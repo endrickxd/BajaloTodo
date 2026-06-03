@@ -480,6 +480,19 @@ body {
     transform: translateY(-2px) scale(1.03);
 }
 
+.tag-youtube {
+    color: #ff3e3e;
+    background: rgba(255, 62, 62, 0.06);
+    border-color: rgba(255, 62, 62, 0.2);
+}
+.tag-youtube:hover {
+    color: #ff3e3e;
+    background: rgba(255, 62, 62, 0.12);
+    border-color: rgba(255, 62, 62, 0.45);
+    box-shadow: 0 0 15px rgba(255, 62, 62, 0.25);
+    transform: translateY(-2px) scale(1.03);
+}
+
 .tag-youtube-disabled {
     color: #88747a;
     background: rgba(255, 255, 255, 0.01);

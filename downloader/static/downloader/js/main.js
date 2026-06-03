@@ -135,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function displayResults(details, qualities) {
-        videoThumbnail.src = '/static/downloader/images/logo.jpg';
+        videoThumbnail.src = details.thumbnail || '/static/downloader/images/logo.jpg';
         videoDuration.textContent = details.duration_formatted;
         
         platformBadge.className = 'platform-badge';
