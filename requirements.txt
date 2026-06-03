@@ -1,0 +1,5 @@
+django>=5.0
+yt-dlp>=2024.3.10
+static-ffmpeg>=2.5
+pytube>=15.0.0
+

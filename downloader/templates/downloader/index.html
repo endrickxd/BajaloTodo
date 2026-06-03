@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pa Jondearrlo - Descarga Video y Audio</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    {% load static %}
+    <link rel="stylesheet" href="{% static 'downloader/css/style.css' %}?v=1.1">
+    <link rel="icon" type="image/png" href="{% static 'downloader/images/favicon.png' %}">
+</head>
+<body>
+    
+    <div class="glow-bg">
+        <div class="glow-sphere glow-primary"></div>
+        <div class="glow-sphere glow-secondary"></div>
+    </div>
+
+    
+    <div class="app-container">
+        
+        
+        <header class="app-header">
+            <div class="logo">
+                <img src="{% static 'downloader/images/favicon.png' %}" alt="Logo" class="logo-img">
+                <span class="logo-text">Bajalo <span class="logo-accent">To</span></span>
+            </div>
+            <button id="theme-toggle" class="theme-toggle-btn" title="Alternar Modo Claro/Oscuro">
+                <i class="fa-solid fa-moon"></i>
+            </button>
+        </header>
+
+        
+        <main class="main-content">
+            
+            <section class="hero-section">
+                <h1 class="hero-title">Bájate lo que quieras <span class="text-gradient"></span></h1>
+                <p class="hero-subtitle">Introduce enlaces de tus plataformas favoritas y descárgalos de forma rápida, segura y con máxima calidad</p>
+                
+                
+                <div class="search-container glass-card">
+                    <form id="analyze-form" class="search-form">
+                        {% csrf_token %}
+                        <div class="input-wrapper">
+                            <i class="fa-solid fa-link input-icon"></i>
+                            <input 
+                                type="url" 
+                                id="video-url" 
+                                name="url" 
+                                placeholder="Pega el enlace de Youtube, Reels o TikTok..." 
+                                required
+                                autocomplete="off"
+                            >
+                        </div>
+                        <button type="submit" id="submit-btn" class="btn btn-primary">
+                            <span>Descargar</span>
+                            <i class="fa-solid fa-circle-down btn-icon"></i>
+                        </button>
+                    </form>
+                </div>
+
+                
+                <div class="platform-section">
+                    <p class="platform-instruction">Haz clic en una plataforma para probar con un enlace de ejemplo:</p>
+                    <div class="platform-tags">
+                        <button type="button" class="platform-tag tag-facebook" id="demo-facebook" data-url="https://www.facebook.com/watch/?v=10153236743539999">
+                            <i class="fa-brands fa-facebook"></i> Facebook
+                        </button>
+                        <button type="button" class="platform-tag tag-twitter" id="demo-twitter" data-url="https://x.com/NASA/status/1684347714902888448">
+                            <i class="fa-brands fa-x-twitter"></i> Twitter
+                        </button>
+                        <button type="button" class="platform-tag tag-instagram" id="demo-instagram" data-url="https://www.instagram.com/reels/CgX94q3HDsA/">
+                            <i class="fa-brands fa-instagram"></i> Instagram
+                        </button>
+                        <button type="button" class="platform-tag tag-tiktok" id="demo-tiktok" data-url="https://www.tiktok.com/@tiktok/video/7106856752762293550">
+                            <i class="fa-brands fa-tiktok"></i> TikTok
+                        </button>
+                        <button type="button" class="platform-tag tag-youtube-disabled" disabled title="YouTube está temporalmente en desarrollo">
+                            <i class="fa-brands fa-youtube"></i> YouTube (En Desarrollo)
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            
+            <section id="loading-section" class="loading-section hidden">
+                <div class="glass-card skeleton-card">
+                    <div class="skeleton-layout">
+                        <div class="skeleton-left">
+                            <div class="skeleton-thumbnail shimmer"></div>
+                        </div>
+                        <div class="skeleton-right">
+                            <div class="skeleton-line title shimmer"></div>
+                            <div class="skeleton-line text shimmer"></div>
+                            <div class="skeleton-line text short shimmer"></div>
+                            <div class="skeleton-tabs">
+                                <div class="skeleton-tab shimmer"></div>
+                                <div class="skeleton-tab shimmer"></div>
+                            </div>
+                            <div class="skeleton-table">
+                                <div class="skeleton-row shimmer"></div>
+                                <div class="skeleton-row shimmer"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="loader-status">
+                    <i class="fa-solid fa-circle-notch fa-spin text-gradient"></i>
+                    <span>Analizando medios en el servidor. Por favor espera...</span>
+                </div>
+            </section>
+
+            
+            <div id="error-card" class="error-card glass-card hidden">
+                <i class="fa-solid fa-circle-exclamation error-icon"></i>
+                <div class="error-info">
+                    <h3 class="error-title">Error al procesar</h3>
+                    <p id="error-message" class="error-text">No se pudo recuperar la información. Verifica que el enlace sea correcto.</p>
+                </div>
+                <button type="button" id="close-error" class="close-btn">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            
+            <section id="result-section" class="result-section hidden">
+                <div class="glass-card result-card">
+                    <div class="result-grid">
+                        
+                        
+                        <div class="media-preview">
+                            <div class="thumbnail-wrapper">
+                                <img id="video-thumbnail" src="" alt="Thumbnail">
+                                <span id="video-duration" class="duration-badge">0:00</span>
+                                <div class="platform-badge" id="platform-badge">
+                                    <i class="fa-brands fa-youtube"></i>
+                                </div>
+                            </div>
+                            <h2 id="video-title" class="video-title">Título del Video</h2>
+                            <p id="video-author" class="video-author">Autor o Canal</p>
+                        </div>
+
+                        
+                        <div class="download-options">
+                            
+                            <div class="tabs-header">
+                                <button class="tab-btn active" data-tab="video-tab" id="tab-video-btn">
+                                    <i class="fa-solid fa-video"></i> Video (MP4)
+                                </button>
+                                <button class="tab-btn" data-tab="audio-tab" id="tab-audio-btn">
+                                    <i class="fa-solid fa-music"></i> Audio (MP3)
+                                </button>
+                            </div>
+
+                            
+                            <div class="tab-content active" id="video-tab">
+                                <div class="table-responsive">
+                                    <table class="options-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Resolución</th>
+                                                <th>Formato</th>
+                                                <th>Tamaño</th>
+                                                <th class="text-right">Acción</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="video-options-body">
+                                            
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            
+                            <div class="tab-content" id="audio-tab">
+                                <div class="table-responsive">
+                                    <table class="options-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Calidad</th>
+                                                <th>Formato</th>
+                                                <th>Bitrate</th>
+                                                <th class="text-right">Acción</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="audio-options-body">
+                                            
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            
+                            <div class="downloader-note">
+                                <i class="fa-solid fa-info-circle"></i>
+                                <span>La descarga comenzará automáticamente una vez que el servidor procese el archivo.</span>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </section>
+
+            
+            <section class="features-grid-section">
+                <div class="feature-card glass-card">
+                    <div class="feature-icon-wrapper">
+                        <i class="fa-solid fa-gauge-high"></i>
+                    </div>
+                    <h3 class="feature-card-title">Descargalo de una</h3>
+                    <p class="feature-card-desc">Extracción a máxima velocidad gracias a nuestro motor optimizado basado en el popular motor de pytube.</p>
+                </div>
+                <div class="feature-card glass-card">
+                    <div class="feature-icon-wrapper">
+                        <i class="fa-solid fa-volume-high"></i>
+                    </div>
+                    <h3 class="feature-card-title">Audio en Alta Calidad</h3>
+                    <p class="feature-card-desc">Conversión instantánea a MP3 con tasas de bits de hasta 320kbps de forma 100% limpia.</p>
+                </div>
+                <div class="feature-card glass-card">
+                    <div class="feature-icon-wrapper">
+                        <i class="fa-solid fa-circle-check"></i>
+                    </div>
+                    <h3 class="feature-card-title">Totalmente Seguro</h3>
+                    <p class="feature-card-desc">Sin anuncios invasivos(Por ahora, hasta anuncio porno le voy a meter para ganar cuarto) ni redirecciones extrañas. El archivo se procesa y se entrega directamente.</p>
+                </div>
+            </section>
+        </main>
+
+        
+        <footer class="app-footer">
+            <p>&copy;Creado por Endric DEV.</p>
+        </footer>
+
+    </div>
+
+    
+    <script src="{% static 'downloader/js/main.js' %}?v=1.1"></script>
+</body>
+</html>
