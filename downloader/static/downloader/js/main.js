@@ -135,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function displayResults(details, qualities) {
-        videoThumbnail.src = details.thumbnail || 'https://via.placeholder.com/320x180?text=No+Thumbnail';
+        videoThumbnail.src = '/static/downloader/images/logo.jpg';
         videoDuration.textContent = details.duration_formatted;
         
         platformBadge.className = 'platform-badge';
@@ -219,6 +219,37 @@ document.addEventListener('DOMContentLoaded', () => {
         resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
+    const successToast = document.getElementById('success-toast');
+    const closeToastBtn = document.getElementById('close-toast');
+    let toastTimer;
+
+    function showSuccessToast() {
+        if (!successToast) return;
+        successToast.classList.remove('hidden');
+        void successToast.offsetWidth;
+        successToast.classList.add('show');
+        
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => {
+            hideSuccessToast();
+        }, 6000);
+    }
+
+    function hideSuccessToast() {
+        if (!successToast) return;
+        successToast.classList.remove('show');
+        setTimeout(() => {
+            successToast.classList.add('hidden');
+        }, 400);
+    }
+
+    if (closeToastBtn) {
+        closeToastBtn.addEventListener('click', () => {
+            clearTimeout(toastTimer);
+            hideSuccessToast();
+        });
+    }
+
     function triggerDownload(button, formatId, type, bitrate = '') {
         button.classList.add('downloading');
         const originalHtml = button.innerHTML;
@@ -234,6 +265,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         window.location.href = `/download/?${queryParams.toString()}`;
+
+        // Show conversion success alert toast
+        showSuccessToast();
 
         setTimeout(() => {
             button.classList.remove('downloading');
