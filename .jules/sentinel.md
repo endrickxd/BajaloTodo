@@ -1,0 +1,4 @@
+## 2024-03-24 - [Fix Hardcoded Secrets and Insecure Defaults]
+**Vulnerability:** A hardcoded Django `SECRET_KEY` was found in `videodownloader_project/settings.py`. Additionally, `DEBUG = True` and `ALLOWED_HOSTS = ['*']` were hardcoded.
+**Learning:** These settings, while convenient for development, expose the application to severe risks if deployed to production. An exposed `SECRET_KEY` can lead to session hijacking, password reset token forgery, and other cryptographic bypasses. `DEBUG = True` leaks sensitive environment details via error pages. `ALLOWED_HOSTS = ['*']` enables HTTP Host header attacks.
+**Prevention:** Always use environment variables (e.g., via `os.environ.get()` or a library like `python-dotenv`) to load sensitive configuration at runtime. Set safe defaults for production environments.
