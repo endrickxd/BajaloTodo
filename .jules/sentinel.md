@@ -1,0 +1,4 @@
+## 2024-11-21 - [Hardcoded Django Settings]
+**Vulnerability:** Django deployment settings (SECRET_KEY, DEBUG, ALLOWED_HOSTS) were hardcoded directly into the settings.py file, which could expose sensitive information if committed to a public repository.
+**Learning:** Even in simple Django apps, keeping production configuration out of source code is vital to prevent secrets leakage. Providing fallbacks to original values preserves local development workflows without compromising production security.
+**Prevention:** Implement settings configurations using `os.environ.get()` with safe defaults or original values as fallbacks for seamless transition from development to production without leaking secrets.
