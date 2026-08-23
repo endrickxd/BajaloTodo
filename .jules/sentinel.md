@@ -1,0 +1,4 @@
+## 2024-05-24 - [Secure Django Configuration]
+**Vulnerability:** Hardcoded Django `SECRET_KEY`, `DEBUG` flag, and `ALLOWED_HOSTS` in `settings.py`. Hardcoding these settings in version control exposes the application to severe security risks (like session hijacking or code execution in production) if the repository is ever compromised or made public.
+**Learning:** Using environment variables for configuration is essential for secure deployments, but naively replacing them can break local development environments or test suites that expect these values to be present without manual setup.
+**Prevention:** Use `os.environ.get()` with the original hardcoded values as fallbacks (e.g., `os.environ.get('DJANGO_SECRET_KEY', 'default-insecure-key')`). This allows production environments to inject secure secrets via environment variables while keeping local development seamless.
