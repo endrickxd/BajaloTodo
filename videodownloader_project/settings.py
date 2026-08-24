@@ -1,12 +1,19 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_'
+# 🛡️ SECURITY: Use environment variables for sensitive settings with fallback for local dev
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_'
+)
 
-DEBUG = True
+# 🛡️ SECURITY: Ensure DEBUG is False in production environments
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = ['*']
+# 🛡️ SECURITY: Explicitly parse allowed hosts or fallback to open host for local dev
+ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',')
 
 INSTALLED_APPS = [
     'downloader',
