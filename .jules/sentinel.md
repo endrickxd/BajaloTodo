@@ -1,0 +1,4 @@
+## 2024-09-01 - [Hardcoded Django Secrets and Debug Mode Exposed]
+**Vulnerability:** The Django `SECRET_KEY`, `DEBUG` mode, and `ALLOWED_HOSTS` were hardcoded in `videodownloader_project/settings.py`. This means anyone with access to the codebase can access the secret key, and deploying with `DEBUG = True` leaks sensitive information via stack traces.
+**Learning:** Development configurations often leak into production environments if they are hardcoded. It is essential to manage environment-specific configurations properly from the start of the project.
+**Prevention:** Use environment variables for sensitive settings like `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS`. Utilize `os.environ.get()` with fallbacks to the old hardcoded values to maintain local development workflows without breaking the application, while allowing production environments to securely inject the configuration.
