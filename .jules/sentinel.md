@@ -1,0 +1,4 @@
+## 2024-05-15 - [Secured Hardcoded Django Settings]
+**Vulnerability:** Django settings `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS` were hardcoded in `videodownloader_project/settings.py`, risking exposure of sensitive keys and enabling potential debug mode abuse in production.
+**Learning:** Hardcoded sensitive settings are a common pattern in initial Django setups but pose critical risks if deployed. Securing them using environment variables while providing fallbacks preserves local development functionality without compromising production security.
+**Prevention:** Always use `os.environ.get()` to load sensitive configuration like `SECRET_KEY` and `DEBUG` from environment variables, ensuring they are not exposed in version control or static files.
