@@ -1,0 +1,4 @@
+## 2024-11-20 - [Securing Django Settings with Fallbacks]
+**Vulnerability:** Hardcoded SECRET_KEY, DEBUG, and ALLOWED_HOSTS in Django settings file could lead to secrets exposure and misconfigurations in production environments.
+**Learning:** Always use environment variables for sensitive settings like SECRET_KEY and environment-specific settings like DEBUG and ALLOWED_HOSTS. Providing the original hardcoded values as fallbacks prevents breaking local development and testing environments while enabling secure configuration in production.
+**Prevention:** Use `os.environ.get()` with appropriate fallbacks for `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS` in `settings.py`. For `DEBUG`, ensure the string is parsed correctly to boolean. For `ALLOWED_HOSTS`, split the string to convert it to a list.
