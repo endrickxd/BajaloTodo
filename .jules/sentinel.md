@@ -1,0 +1,4 @@
+## 2024-06-25 - [Securing Django Settings]
+**Vulnerability:** Hardcoded `SECRET_KEY`, `DEBUG` set to `True`, and `ALLOWED_HOSTS` set to `['*']` in `settings.py`. These hardcoded values can lead to severe security risks like secret leakage, exposing sensitive debug information in production, and Host header injection attacks.
+**Learning:** Found these hardcoded values in `videodownloader_project/settings.py`. When extracting settings to environment variables, it's critical to provide the original hardcoded values as fallbacks (e.g. `os.environ.get('SECRET_KEY', 'original_value')`) to prevent breaking local development and test environments that may rely on those values being present without explicit environment configuration.
+**Prevention:** Always use environment variables for sensitive settings like `SECRET_KEY`, and environment-dependent settings like `DEBUG` and `ALLOWED_HOSTS` in Django projects. Use fallbacks for local development where applicable.
