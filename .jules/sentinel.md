@@ -1,0 +1,4 @@
+## 2024-03-22 - [Refactor Hardcoded Secrets to Environment Variables]
+**Vulnerability:** Hardcoded Django `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS` in `videodownloader_project/settings.py`.
+**Learning:** These settings should not be hardcoded as they expose sensitive information (like the secret key) and can allow unintended behaviors if deployed to production without modifications. Using environment variables enables secure configuration tailored to the execution environment. Using `.get()` with default fallbacks ensures local development continues to work seamlessly without requiring developers to set up a full `.env` file first.
+**Prevention:** In new Django projects or configuration updates, always rely on `os.environ.get()` to load sensitive and environment-specific variables, falling back to local defaults only.
