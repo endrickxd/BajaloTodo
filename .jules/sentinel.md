@@ -1,0 +1,4 @@
+## 2024-11-23 - Hardcoded Django Environment Settings
+**Vulnerability:** Django core settings like `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS` are hardcoded in the codebase which is pushed to source control.
+**Learning:** Hardcoded environment variables can inadvertently allow attackers to craft malicious attacks or extract sensitive information. Using `os.environ.get()` with the original hardcoded values as fallbacks prevents breaking local development and testing environments, whilst ensuring that production deployments can inject safe values.
+**Prevention:** Secure Django settings like `SECRET_KEY`, `DEBUG`, or `ALLOWED_HOSTS` with environment variables, using `os.environ.get()` with the original hardcoded values as fallbacks to prevent breaking local development and testing environments.
