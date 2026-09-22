@@ -1,0 +1,4 @@
+## 2024-05-24 - Hardcoded Django SECRET_KEY and Insecure Settings
+**Vulnerability:** The Django project's `settings.py` contained a hardcoded `SECRET_KEY`, and had `DEBUG = True` and `ALLOWED_HOSTS = ['*']` hardcoded without allowing configuration via environment variables for production deployments.
+**Learning:** Hardcoding secrets like `SECRET_KEY` in source control exposes the application to severe risks like session hijacking, cryptographic signing bypasses, and unauthorized access. Leaving `DEBUG = True` and permissive `ALLOWED_HOSTS` hardcoded poses risks of information leakage and host header injection if deployed to production without modifications.
+**Prevention:** Always use environment variables (e.g., `os.environ.get`) for sensitive configuration and environment-specific settings in Django. Ensure appropriate fallback values are provided to not break local development.
