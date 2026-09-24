@@ -1,0 +1,4 @@
+## 2024-05-24 - SSRF Mitigation in Third-Party API Callbacks
+**Vulnerability:** The `download_via_cobalt` function in `downloader/utils.py` previously fetched the `download_url` directly as returned by the Cobalt API without validation. A malicious or compromised Cobalt instance could have returned an internal, private IP, or `file://` scheme, leading to Server-Side Request Forgery (SSRF) when `requests.get` was executed on the server.
+**Learning:** Third-party API callbacks that dictate URLs to fetch on the server side are highly susceptible to SSRF, even if the primary usage is for public resources.
+**Prevention:** Always validate URLs obtained from external sources prior to issuing server-side HTTP requests. Enforce allowed schemes (`http`/`https`) and explicitly resolve hostnames to ensure they do not map to private, loopback, link-local, or multicast IPs using libraries like `socket` and `ipaddress`.
