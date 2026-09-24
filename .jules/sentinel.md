@@ -1,0 +1,4 @@
+## 2024-09-24 - SSRF vulnerability in Cobalt fallback downloader
+**Vulnerability:** In `downloader/utils.py`, the `download_via_cobalt` function fetches an external URL from the Cobalt API (or alternative instances) and directly uses the provided URL in a subsequent `requests.get()` call without any validation. This creates a Server-Side Request Forgery (SSRF) vulnerability.
+**Learning:** External API responses shouldn't be implicitly trusted when directing subsequent server requests. Even if the Cobalt instances are known, they could be compromised or manipulated to return internal IP addresses or sensitive local files, which the Django server would then attempt to fetch.
+**Prevention:** Implement strict URL validation for any dynamically resolved URL before passing it to HTTP clients like `requests`. Validate the scheme (`http`/`https`) and resolve the hostname to ensure the target IP is not private, loopback, or link-local.

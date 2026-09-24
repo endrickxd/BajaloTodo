@@ -4,11 +4,37 @@ import uuid
 import requests
 import logging
 import re
+import ipaddress
+import socket
+from urllib.parse import urlparse
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ['http', 'https']:
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Resolve hostname to an IP to avoid DNS-based SSRF bypasses
+        try:
+            resolved_ip = socket.gethostbyname(hostname)
+        except socket.gaierror:
+            return False # Unresolvable domain
+
+        ip = ipaddress.ip_address(resolved_ip)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return False
+
+        return True
+    except Exception:
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -74,6 +100,9 @@ def download_via_cobalt(url, is_audio=False):
         raise ValueError("No se pudo descargar el archivo a través del fallback de Cobalt. Por favor, intente con otro enlace o más tarde.")
 
     download_url = cobalt_data.get("url")
+    if not download_url or not is_safe_url(download_url):
+        raise ValueError("URL de descarga no válida o insegura proporcionada por el servidor Cobalt.")
+
     cobalt_filename = cobalt_data.get("filename") or ("download.mp3" if is_audio else "download.mp4")
 
     # Clean the filename for presentation
