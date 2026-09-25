@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,27 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def is_safe_url(url):
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ["http", "https"]:
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for result in addr_info:
+            ip = result[4][0]
+            ip_obj = ipaddress.ip_address(ip)
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"URL validation failed for {url}: {str(e)}")
+        return False
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -86,6 +110,9 @@ def download_via_cobalt(url, is_audio=False):
     expected_path = os.path.join(settings.DOWNLOADS_DIR, f"{unique_id}.{target_ext}")
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
+    if not is_safe_url(download_url):
+        raise ValueError("URL de descarga no segura o inválida.")
+
     try:
         response = requests.get(download_url, stream=True, timeout=60)
         response.raise_for_status()

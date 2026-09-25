@@ -1,0 +1,4 @@
+## 2024-09-25 - Prevent SSRF in External API Callbacks
+**Vulnerability:** Server-Side Request Forgery (SSRF) when downloading files from URLs returned by the external Cobalt API.
+**Learning:** Even when interacting with "trusted" third-party APIs, any URLs returned and subsequently fetched by the server must be strictly validated. An attacker could potentially manipulate the API or exploit a misconfiguration to return a local URL (e.g., `http://127.0.0.1/admin`), causing the server to make unauthorized internal requests.
+**Prevention:** Implement strict URL validation before fetching using `requests.get()`. This includes resolving the hostname to its IP address via `socket.getaddrinfo()` and verifying that the IP does not fall into private, loopback, or link-local ranges using `ipaddress`. Additionally, be aware that standard `requests.get()` follows redirects by default, which can be an additional bypass vector for SSRF.
