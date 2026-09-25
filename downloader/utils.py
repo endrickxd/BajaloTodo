@@ -4,7 +4,30 @@ import uuid
 import requests
 import logging
 import re
+import urllib.parse
+import socket
+import ipaddress
 from django.conf import settings
+
+def is_safe_url(url):
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_infos = socket.getaddrinfo(hostname, None)
+
+        for addr in addr_infos:
+            ip = addr[4][0]
+            ip_obj = ipaddress.ip_address(ip)
+            if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+                return False
+
+        return True
+    except Exception as e:
+        logger.warning(f"[SSRF] URL validation failed for {url}: {str(e)}")
+        return False
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +97,9 @@ def download_via_cobalt(url, is_audio=False):
         raise ValueError("No se pudo descargar el archivo a través del fallback de Cobalt. Por favor, intente con otro enlace o más tarde.")
 
     download_url = cobalt_data.get("url")
+    if not download_url or not is_safe_url(download_url):
+        raise ValueError("La URL de descarga no es segura o es inválida.")
+
     cobalt_filename = cobalt_data.get("filename") or ("download.mp3" if is_audio else "download.mp4")
 
     # Clean the filename for presentation
