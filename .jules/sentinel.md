@@ -1,0 +1,4 @@
+## 2024-05-24 - [Unvalidated External Cobalt URL Extraction SSRF]
+**Vulnerability:** `downloader/utils.py` uses `requests.get(download_url, stream=True)` where `download_url` is sourced entirely from an external API (Cobalt) without any validation on the URL. This allows SSRF (Server-Side Request Forgery) since the remote server can return a private IP address, allowing it to request internal resources.
+**Learning:** External API responses containing URLs to be fetched should be explicitly validated to not point to local, private, or loopback IPs before downloading from them, as the remote server could be malicious or compromised.
+**Prevention:** Always validate `url` against SSRF targets (private networks) by resolving the IP and checking against reserved ranges before making `requests.get()` calls.
