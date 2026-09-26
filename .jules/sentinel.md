@@ -1,0 +1,5 @@
+
+## 2024-05-24 - [CRITICAL] Prevent SSRF in External API Callbacks via IP Validation
+**Vulnerability:** The application consumed an external URL from the Cobalt API and used `requests.get` to download content without validating the returned URL. This could lead to a Server-Side Request Forgery (SSRF) attack if the external service returned internal or private IP addresses (e.g., localhost, 169.254.169.254, or file schemas).
+**Learning:** External API responses, especially those returning URLs meant for subsequent server-side fetching, must be treated as untrusted input. Simple DNS name checks are insufficient due to DNS rebinding or custom A records pointing to internal IPs.
+**Prevention:** Always parse the URL to enforce `http`/`https` schemes, explicitly resolve the hostname to IP addresses (using robust methods like `socket.getaddrinfo`), and validate that the resolved IPs do not fall into private, loopback, multicast, or reserved ranges using the `ipaddress` module before initiating the request.
