@@ -1,9 +1,14 @@
-import os
-import yt_dlp
-import uuid
-import requests
 import logging
+import os
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
+import uuid
+
+import requests
+import yt_dlp
+
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -85,9 +90,32 @@ def download_via_cobalt(url, is_audio=False):
     target_ext = 'mp3' if is_audio else 'mp4'
     expected_path = os.path.join(settings.DOWNLOADS_DIR, f"{unique_id}.{target_ext}")
 
+    # Mitigates SSRF by preventing requests to internal infrastructure (private, loopback, etc.)
+    def is_safe_url(url_to_check):
+        try:
+            hostname = urlparse(url_to_check).hostname
+            if not hostname: return False
+            for info in socket.getaddrinfo(hostname, None):
+                ip = ipaddress.ip_address(info[4][0])
+                if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                    ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+                    return False
+            return True
+        except Exception:
+            return False
+
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        current_url = download_url
+        for _ in range(5):
+            if not is_safe_url(current_url):
+                raise ValueError("URL de descarga no segura.")
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+            if response.is_redirect:
+                current_url = urljoin(current_url, response.headers.get('location', ''))
+                continue
+            break
+
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
