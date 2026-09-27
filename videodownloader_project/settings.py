@@ -1,8 +1,10 @@
 from pathlib import Path
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_'
+# Mitigates hardcoded secrets by allowing SECRET_KEY to be overridden by an environment variable.
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_')
 
 DEBUG = True
 
