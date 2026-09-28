@@ -1,0 +1,4 @@
+## 2024-05-18 - SSRF vulnerability in Cobalt API downloads with redirects
+**Vulnerability:** The application fetches media files using URLs returned from external Cobalt API instances. `requests.get()` follows redirects by default without validating the redirect location, creating an SSRF vulnerability where an attacker can supply an external URL that redirects to internal infrastructure.
+**Learning:** Even if the initial URL is validated, `requests.get(..., allow_redirects=True)` (the default) will blindly follow redirects to any location, bypassing initial URL validation.
+**Prevention:** To prevent SSRF when handling external URLs, you must resolve the hostname and check against private/loopback IP address ranges to prevent DNS rebinding or custom DNS A records. Additionally, handle redirects manually by setting `allow_redirects=False` and validating the URL at each redirect step.
