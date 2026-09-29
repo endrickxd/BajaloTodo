@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,41 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def safe_get(url, **kwargs):
+    """
+    Mitigates SSRF by preventing requests to internal infrastructure.
+    Checks the URL host using socket.getaddrinfo and verifies it's not internal.
+    Explicitly handles redirects to ensure all hops are checked for SSRF.
+    """
+    max_redirects = 5
+    current_url = url
+    session = requests.Session()
+
+    for _ in range(max_redirects):
+        parsed = urlparse(current_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError("Invalid URL scheme or hostname")
+
+        try:
+            for res in socket.getaddrinfo(parsed.hostname, None):
+                ip = ipaddress.ip_address(res[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                    raise ValueError("SSRF protection: URL resolves to internal network")
+        except socket.gaierror:
+            raise ValueError("Failed to resolve hostname")
+
+        response = session.get(current_url, allow_redirects=False, **kwargs)
+        if response.is_redirect:
+            response.close()
+            next_url = response.headers.get('location')
+            if not next_url:
+                raise ValueError("Redirect missing location header")
+            current_url = urljoin(response.url, next_url)
+        else:
+            return response
+
+    raise ValueError("Too many redirects")
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -87,7 +125,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_get(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
