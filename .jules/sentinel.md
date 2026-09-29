@@ -1,0 +1,4 @@
+## 2024-09-29 - [CRITICAL] Prevent SSRF in redirect chains
+**Vulnerability:** The application fetches external URLs provided by a third-party API (Cobalt) using `requests.get` which follows redirects by default. A malicious or compromised Cobalt instance could redirect the download URL to internal services (e.g., `http://169.254.169.254` or `http://127.0.0.1`), enabling Server-Side Request Forgery (SSRF).
+**Learning:** Checking the initial URL is not enough if the HTTP client automatically follows redirects. Attackers can bypass initial validation by pointing to an external server that responds with a 3xx redirect to an internal IP.
+**Prevention:** Always set `allow_redirects=False` when fetching untrusted URLs and handle redirects manually. In each redirect hop, the target URL's hostname must be resolved using `socket.getaddrinfo` and validated against private, loopback, link-local, multicast, and unspecified IP address ranges before proceeding with the request.
