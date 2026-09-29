@@ -1,0 +1,4 @@
+## 2024-05-24 - SSRF vulnerability via DNS rebinding and automatic redirects
+**Vulnerability:** The `download_via_cobalt` function passed user-controlled URLs (returned from an external API) directly to `requests.get()` without validation, which followed redirects by default, allowing Server-Side Request Forgery (SSRF) against internal infrastructure.
+**Learning:** External API responses can redirect to internal IPs or resolve to private IPs after initial checks. `requests.get()` follows redirects blindly, bypassing initial URL validation. DNS resolution must occur using robust methods like `socket.getaddrinfo` to catch IP variants (like IPv6 and CDNs).
+**Prevention:** Implement `allow_redirects=False` in `requests.get()` and manually handle redirect loops. Before fetching any URL (initial or redirect), resolve the hostname to its IP address and strictly assert it is not in private, loopback, link-local, multicast, or unspecified ranges.
