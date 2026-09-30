@@ -1,10 +1,32 @@
 import os
+import socket
+import ipaddress
+import urllib.parse
 import yt_dlp
 import uuid
 import requests
 import logging
 import re
 from django.conf import settings
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        addrinfo = socket.getaddrinfo(hostname, None)
+        for info in addrinfo:
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"URL validation failed for {url}: {e}")
+        return False
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +109,28 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        current_url = download_url
+        redirects = 0
+        response = None
+        while redirects < 5:
+            if not is_safe_url(current_url):
+                raise ValueError("URL no segura detectada.")
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+            if response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get('Location')
+                response.close()
+                if not location:
+                    break
+                current_url = urllib.parse.urljoin(current_url, location)
+                redirects += 1
+            else:
+                break
+
+        if response is None or response.status_code != 200:
+            if response:
+                response.close()
+            raise ValueError("Error al descargar: Demasiados redireccionamientos o respuesta no válida.")
+
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
