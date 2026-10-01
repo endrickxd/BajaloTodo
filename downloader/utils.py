@@ -4,9 +4,34 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Resolve all IPs for the hostname to prevent DNS rebinding or custom A records pointing to private IPs
+        addr_info = socket.getaddrinfo(hostname, None)
+        for info in addr_info:
+            ip = info[4][0]
+            ip_obj = ipaddress.ip_address(ip)
+            if (ip_obj.is_private or ip_obj.is_loopback or
+                ip_obj.is_link_local or ip_obj.is_multicast or
+                ip_obj.is_unspecified):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"[SSRF] Error validating URL {url}: {str(e)}")
+        return False
 
 DURATION_LIMIT = 1800
 
@@ -87,13 +112,38 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        max_redirects = 5
+        response = None
+
+        for _ in range(max_redirects):
+            if not is_safe_url(current_url):
+                raise ValueError("URL points to an invalid or restricted IP address.")
+
+            # Mitigates SSRF by preventing requests to internal infrastructure during redirects
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.status_code in (301, 302, 303, 307, 308):
+                redirect_url = response.headers.get('Location')
+                response.close()
+                if not redirect_url:
+                    raise ValueError("Redirect response missing Location header.")
+                current_url = urllib.parse.urljoin(current_url, redirect_url)
+            elif response.status_code == 200:
+                break
+            else:
+                response.raise_for_status()
+
+        if response is None or response.status_code != 200:
+            raise ValueError("Too many redirects or failed to get a successful response.")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
     except Exception as e:
+        if 'response' in locals() and response is not None:
+            response.close()
         if os.path.exists(expected_path):
             try:
                 os.remove(expected_path)
