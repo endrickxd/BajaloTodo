@@ -1,0 +1,4 @@
+## 2024-10-24 - [SSRF Bypass via HTTP Redirects]
+**Vulnerability:** The application was using `requests.get()` to fetch external API URLs (from Cobalt), which defaults to following HTTP redirects (`allow_redirects=True`). Even if the initial URL is validated, a malicious server can respond with a 3xx redirect pointing to an internal service (e.g., `http://169.254.169.254`), bypassing the initial URL validation.
+**Learning:** Initial URL validation is insufficient if the HTTP client automatically follows redirects. The target of each redirect must also be validated to prevent SSRF.
+**Prevention:** Always set `allow_redirects=False` when making requests with user-controlled or external URLs. Implement a manual redirect loop where every intermediate redirect URL is resolved via `urllib.parse.urljoin`, explicitly validated (e.g., DNS resolution to check for private IPs), and intermediate responses are properly closed before continuing the loop.
