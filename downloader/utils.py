@@ -1,4 +1,7 @@
 import os
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 import yt_dlp
 import uuid
 import requests
@@ -65,6 +68,40 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def _safe_get_stream(url, max_redirects=5):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    current_url = url
+    for _ in range(max_redirects):
+        parsed = urlparse(current_url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Invalid URL provided by Cobalt.")
+
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+            for info in addr_info:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                    raise ValueError("Blocked attempt to access internal IP address.")
+        except socket.gaierror:
+            raise ValueError("DNS resolution failed for the download URL.")
+
+        response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+        if 300 <= response.status_code < 400:
+            loc = response.headers.get('Location')
+            response.close()
+            if not loc:
+                raise ValueError("Redirect missing Location header.")
+            current_url = urljoin(current_url, loc)
+            continue
+
+        if response.status_code != 200:
+            response.close()
+            raise ValueError(f"Failed to download. Status code: {response.status_code}")
+
+        return response
+    raise ValueError("Too many redirects encountered.")
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -87,8 +124,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        response = _safe_get_stream(download_url)
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
