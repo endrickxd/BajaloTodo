@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,23 @@ COBALT_INSTANCES = [
     "https://lime.clxxped.lol",
     "https://nuko-c.meowing.de",
 ]
+
+def _is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        hostname = urlparse(url).hostname
+        if not hostname:
+            return False
+
+        # Resolve hostname to IP addresses and check all of them
+        for addr in socket.getaddrinfo(hostname, None):
+            ip = ipaddress.ip_address(addr[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"URL validation failed for {url}: {e}")
+        return False
 
 def fetch_from_cobalt(url, is_audio=False):
     payload = {
@@ -87,8 +107,38 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        redirects = 0
+        max_redirects = 10
+        response = None
+
+        while redirects < max_redirects:
+            if not _is_safe_url(current_url):
+                raise ValueError("Enlace de descarga no seguro detectado.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if not location:
+                    response.close()
+                    raise ValueError("Redirección sin cabecera Location.")
+
+                # Close the intermediate response to prevent resource leaks
+                response.close()
+                current_url = urljoin(current_url, location)
+                redirects += 1
+            elif response.status_code == 200:
+                break
+            else:
+                response.raise_for_status()
+                break
+
+        if response is None or response.status_code != 200:
+            if response:
+                response.close()
+            raise ValueError("No se pudo obtener el archivo final.")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
