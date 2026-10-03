@@ -1,4 +1,7 @@
 import os
+import socket
+import ipaddress
+import urllib.parse
 import yt_dlp
 import uuid
 import requests
@@ -9,6 +12,28 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for info in addr_info:
+            ip_str = info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"[SSRF] Error validating URL {url}: {e}")
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,8 +112,35 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        redirects = 0
+        max_redirects = 5
+        response = None
+
+        while redirects < max_redirects:
+            if not is_safe_url(current_url):
+                raise ValueError("URL de descarga no segura (SSRF prevenido).")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.status_code in (301, 302, 303, 307, 308):
+                new_url = response.headers.get('Location')
+                response.close()
+                if not new_url:
+                    raise ValueError("Redirección sin URL de destino.")
+                current_url = urllib.parse.urljoin(current_url, new_url)
+                redirects += 1
+                continue
+
+            response.raise_for_status()
+            break
+
+        if redirects >= max_redirects:
+            raise ValueError("Demasiadas redirecciones.")
+
+        if not response or response.status_code != 200:
+            raise ValueError("Error al obtener la respuesta de la URL de descarga.")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
