@@ -1,4 +1,7 @@
 import os
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 import yt_dlp
 import uuid
 import requests
@@ -9,6 +12,22 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        if not parsed.hostname:
+            return False
+        for info in socket.getaddrinfo(parsed.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception:
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,12 +106,41 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        redirects = 0
+        response = None
+        while redirects < 5:
+            if not is_safe_url(current_url):
+                if response:
+                    response.close()
+                raise ValueError("URL resuelta a IP interna o no válida (SSRF prevention).")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if not location:
+                    response.close()
+                    raise ValueError("Redirección sin Location header.")
+                current_url = urljoin(current_url, location)
+                response.close()
+                redirects += 1
+            elif response.status_code == 200:
+                break
+            else:
+                response.raise_for_status()
+                break
+
+        if not response or response.status_code != 200:
+            if response:
+                response.close()
+            raise ValueError("No se pudo obtener un estado 200 OK.")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+        response.close()
     except Exception as e:
         if os.path.exists(expected_path):
             try:
