@@ -1,0 +1,4 @@
+## 2024-10-04 - SSRF vulnerability due to blind redirect following
+**Vulnerability:** A Server-Side Request Forgery (SSRF) vulnerability existed where `requests.get()` blindly followed redirects from URLs returned by an external API (Cobalt), potentially bypassing initial DNS/IP validation and exposing internal network infrastructure.
+**Learning:** `requests.get()` follows redirects by default. Validating the initial URL is insufficient if the server can redirect the request to an internal IP (e.g., `127.0.0.1` or `169.254.169.254`).
+**Prevention:** Always implement manual redirect handling (`allow_redirects=False`) and perform hostname resolution (via `socket.getaddrinfo`) and strict IP validation at each step of the redirection chain before fetching the content. Ensure intermediate responses are correctly closed.
