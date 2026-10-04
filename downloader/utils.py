@@ -1,9 +1,13 @@
-import os
-import yt_dlp
-import uuid
-import requests
+import ipaddress
 import logging
+import os
 import re
+import socket
+import urllib.parse
+import uuid
+
+import requests
+import yt_dlp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -87,8 +91,38 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        # Mitigates SSRF by preventing requests to internal infrastructure using manual redirect handling and IP validation
+        current_url = download_url
+        max_redirects = 5
+        response = None
+        for _ in range(max_redirects):
+            parsed_url = urllib.parse.urlparse(current_url)
+            hostname = parsed_url.hostname
+            if not hostname:
+                raise ValueError("Invalid URL: Missing hostname")
+
+            addr_info = socket.getaddrinfo(hostname, None)
+            for res in addr_info:
+                ip_str = res[4][0]
+                ip_obj = ipaddress.ip_address(ip_str)
+                if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+                    raise ValueError(f"SSRF Attempt Blocked: Resolved IP {ip_str} is in a restricted range.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.is_redirect:
+                redirect_url = response.headers.get('Location')
+                response.close()
+                if not redirect_url:
+                    raise ValueError("Redirect Location header missing")
+                current_url = urllib.parse.urljoin(current_url, redirect_url)
+                continue
+
+            response.raise_for_status()
+            break
+        else:
+            raise ValueError("Too many redirects")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -100,6 +134,9 @@ def download_via_cobalt(url, is_audio=False):
             except:
                 pass
         raise ValueError(f"Error al descargar desde el servidor de Cobalt: {str(e)}")
+    finally:
+        if 'response' in locals() and response and not response.is_redirect:
+             response.close()
 
     return expected_path, clean_title
 
