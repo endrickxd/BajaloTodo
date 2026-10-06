@@ -1,9 +1,13 @@
-import os
-import yt_dlp
-import uuid
-import requests
+import ipaddress
 import logging
+import os
 import re
+import socket
+import urllib.parse
+import uuid
+
+import requests
+import yt_dlp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -85,14 +89,60 @@ def download_via_cobalt(url, is_audio=False):
     target_ext = 'mp3' if is_audio else 'mp4'
     expected_path = os.path.join(settings.DOWNLOADS_DIR, f"{unique_id}.{target_ext}")
 
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    def is_safe_url(url):
+        try:
+            parsed = urllib.parse.urlparse(url)
+            hostname = parsed.hostname
+            if not hostname:
+                return False
+
+            # Resolve hostname to IPs using socket.getaddrinfo (handles IPv6/CDNs)
+            # Note: This has an inherent Time-of-Check to Time-of-Use (TOCTOU) DNS rebinding limitation.
+            addr_info = socket.getaddrinfo(hostname, None)
+            for addr in addr_info:
+                ip_str = addr[4][0]
+                ip_obj = ipaddress.ip_address(ip_str)
+                if (ip_obj.is_private or ip_obj.is_loopback or
+                    ip_obj.is_link_local or ip_obj.is_multicast or
+                    ip_obj.is_unspecified):
+                    return False
+            return True
+        except Exception as e:
+            logger.warning(f"URL validation failed for {url}: {e}")
+            return False
+
+    def safe_download_stream(url, filepath):
+        current_url = url
+        # Handle redirects manually to prevent SSRF bypass via redirects
+        for _ in range(5): # Max 5 redirects
+            if not is_safe_url(current_url):
+                raise ValueError("Download URL points to a restricted IP address.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+            if response.status_code in (301, 302, 303, 307, 308):
+                redirect_url = response.headers.get('Location')
+                response.close()
+                if not redirect_url:
+                    raise ValueError("Redirect URL missing Location header.")
+                current_url = urllib.parse.urljoin(current_url, redirect_url)
+                continue
+
+            if response.ok:
+                with open(filepath, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                return
+            else:
+                response.close()
+                response.raise_for_status()
+                break # Fallback in case raise_for_status doesn't throw
+        raise ValueError("Too many redirects or download failed.")
+
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
-        with open(expected_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+        safe_download_stream(download_url, expected_path)
     except Exception as e:
         if os.path.exists(expected_path):
             try:
