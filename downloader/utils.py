@@ -4,11 +4,28 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    try:
+        hostname = urlparse(url).hostname
+        if not hostname:
+            return False
+        for info in socket.getaddrinfo(hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"URL validation error for {url}: {e}")
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,8 +104,31 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        # Mitigates SSRF by preventing requests to internal infrastructure
+        if not is_safe_url(current_url):
+            raise ValueError("Invalid or unsafe download URL.")
+
+        for _ in range(10):
+            response = requests.get(current_url, stream=True, allow_redirects=False, timeout=60)
+            if response.is_redirect:
+                location = response.headers.get('Location')
+                response.close()
+                if not location:
+                    raise ValueError("Redirect without Location header.")
+                current_url = urljoin(current_url, location)
+                if not is_safe_url(current_url):
+                    raise ValueError("Redirect to unsafe download URL.")
+                continue
+
+            if response.ok:
+                break
+            else:
+                response.raise_for_status()
+                break
+        else:
+            raise ValueError("Too many redirects.")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
