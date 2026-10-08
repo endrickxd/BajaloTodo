@@ -1,0 +1,4 @@
+## 2024-05-24 - SSRF TOCTOU Limitation with Application-Layer Validation
+**Vulnerability:** Server-Side Request Forgery (SSRF) bypass via DNS Rebinding.
+**Learning:** When mitigating SSRF by resolving hostnames to IP addresses using `socket.getaddrinfo` and validating against internal IP ranges before passing the URL to `requests.get()`, a Time-of-Check to Time-of-Use (TOCTOU) vulnerability inherently exists. An attacker could use a DNS server configured with a short TTL to return a safe IP during validation, but an internal IP during the subsequent HTTP request retrieval.
+**Prevention:** For complete protection against DNS rebinding, network-level restrictions (e.g., firewall rules or dedicated egress proxies) should be employed in conjunction with application-layer validation, or custom HTTP adapters that bind directly to the validated IP instead of resolving the hostname again.
