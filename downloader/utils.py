@@ -4,11 +4,34 @@ import uuid
 import requests
 import logging
 import re
+import urllib.parse
+import socket
+import ipaddress
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for info in addr_info:
+            ip_str = info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or ip.is_loopback or
+                ip.is_link_local or ip.is_multicast or
+                ip.is_unspecified):
+                return False
+        return True
+    except (ValueError, socket.gaierror, TypeError):
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,12 +110,41 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        redirect_count = 0
+        response = None
+
+        while redirect_count < 5:
+            if not is_safe_url(current_url):
+                if response:
+                    response.close()
+                raise ValueError("Unsafe URL detected.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.is_redirect:
+                response.close()
+                next_url = response.headers.get('location')
+                if not next_url:
+                    raise ValueError("Redirect without location")
+                current_url = urllib.parse.urljoin(current_url, next_url)
+                redirect_count += 1
+            elif response.ok:
+                break
+            else:
+                response.raise_for_status()
+                break
+
+        if not response or not response.ok:
+            if response:
+                response.close()
+            raise ValueError("Too many redirects or failed request")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+        response.close()
     except Exception as e:
         if os.path.exists(expected_path):
             try:
