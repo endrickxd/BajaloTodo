@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,57 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Resolve hostname to IP addresses
+        addr_info = socket.getaddrinfo(hostname, None)
+        for result in addr_info:
+            ip = result[4][0]
+            ip_obj = ipaddress.ip_address(ip)
+            if (ip_obj.is_private or
+                ip_obj.is_loopback or
+                ip_obj.is_link_local or
+                ip_obj.is_multicast or
+                ip_obj.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+def safe_request_get(url, stream=False, timeout=60, max_redirects=5):
+    """Safely fetches a URL while mitigating SSRF and handling redirects manually."""
+    current_url = url
+    for _ in range(max_redirects):
+        if not is_safe_url(current_url):
+            raise ValueError("Invalid or unsafe URL detected.")
+
+        response = requests.get(current_url, stream=stream, timeout=timeout, allow_redirects=False)
+
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            response.close() # Prevent resource leaks
+            if not redirect_url:
+                raise ValueError("Redirect status code but no Location header.")
+            current_url = urljoin(current_url, redirect_url)
+            continue
+
+        if response.ok:
+            return response
+        else:
+            response.raise_for_status()
+            break
+
+    raise ValueError("Too many redirects")
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -87,8 +141,8 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        # Mitigates SSRF by preventing requests to internal infrastructure
+        response = safe_request_get(download_url, stream=True, timeout=60)
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
