@@ -4,7 +4,44 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
 from django.conf import settings
+
+def safe_requests_get(url, **kwargs):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    kwargs['allow_redirects'] = False
+    current_url = url
+    for _ in range(10): # max redirects
+        try:
+            parsed = urllib.parse.urlparse(current_url)
+            if parsed.scheme not in ('http', 'https'):
+                raise ValueError(f"Unsafe scheme: {parsed.scheme}")
+            hostname = parsed.hostname
+            if not hostname:
+                raise ValueError("Missing hostname")
+
+            addr_info = socket.getaddrinfo(hostname, None)
+            for info in addr_info:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                    raise ValueError(f"Unsafe IP address detected: {ip}")
+        except ValueError as e:
+            raise ValueError(f"Unsafe URL detected: {e}")
+        except Exception as e:
+            raise ValueError(f"Error validating URL: {e}")
+
+        response = requests.get(current_url, **kwargs)
+        if 300 <= response.status_code < 400:
+            current_url = urllib.parse.urljoin(current_url, response.headers.get('Location', ''))
+            response.close()
+            continue
+        if not response.ok:
+            response.raise_for_status()
+            break
+        return response
+    raise ValueError("Too many redirects")
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +124,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
