@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,26 @@ COBALT_INSTANCES = [
     "https://lime.clxxped.lol",
     "https://nuko-c.meowing.de",
 ]
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addrinfo = socket.getaddrinfo(hostname, None)
+        for info in addrinfo:
+            ip_str = info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or ip.is_loopback or
+                ip.is_link_local or ip.is_multicast or
+                ip.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
 
 def fetch_from_cobalt(url, is_audio=False):
     payload = {
@@ -87,8 +110,30 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        response = None
+        for _ in range(5):
+            if not is_safe_url(current_url):
+                if response:
+                    response.close()
+                raise ValueError("URL de descarga no segura detectada.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+            if response.is_redirect:
+                next_url = response.headers.get('Location')
+                response.close()
+                if not next_url:
+                    break
+                current_url = urllib.parse.urljoin(current_url, next_url)
+            elif response.ok:
+                break
+            else:
+                response.raise_for_status()
+                break
+
+        if not response or not response.ok:
+            raise ValueError("No se pudo descargar el archivo (estado no exitoso o muchas redirecciones).")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
