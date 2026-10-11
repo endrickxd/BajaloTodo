@@ -1,4 +1,7 @@
 import os
+import urllib.parse
+import ipaddress
+import socket
 import yt_dlp
 import uuid
 import requests
@@ -9,6 +12,35 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        try:
+            addrinfo = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            return False
+
+        for _, _, _, _, sockaddr in addrinfo:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                    return False
+            except ValueError:
+                continue
+
+        return True
+    except Exception:
+        return False
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,8 +119,41 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        max_redirects = 5
+        response = None
+
+        for _ in range(max_redirects):
+            if not is_safe_url(current_url):
+                if response:
+                    response.close()
+                raise ValueError("Unsafe URL detected.")
+
+            # Mitigates SSRF by preventing requests to internal infrastructure
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.is_redirect:
+                response.close()
+                next_url = response.headers.get('location')
+                if not next_url:
+                    raise ValueError("Redirect without location.")
+                current_url = urllib.parse.urljoin(current_url, next_url)
+                continue
+
+            if response.ok:
+                break
+            else:
+                response.raise_for_status()
+                break
+        else:
+            if response:
+                response.close()
+            raise ValueError("Too many redirects.")
+
+        if not response.ok:
+            response.close()
+            raise ValueError(f"Failed to fetch url, status: {response.status_code}")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
