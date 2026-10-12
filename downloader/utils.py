@@ -4,9 +4,35 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+def is_safe_url(url):
+    """
+    Mitigates SSRF by preventing requests to internal infrastructure.
+    Resolves the hostname and checks if any IP is in restricted ranges.
+    """
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for info in addr_info:
+            ip_str = info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"Error validating URL {url}: {e}")
+        return False
 
 DURATION_LIMIT = 1800
 
@@ -87,12 +113,45 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        current_url = download_url
+        max_redirects = 5
+        response = None
+
+        for _ in range(max_redirects):
+            if not is_safe_url(current_url):
+                if response:
+                    response.close()
+                raise ValueError("URL no segura detectada por protección SSRF.")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.is_redirect:
+                location = response.headers.get('Location')
+                if not location:
+                    response.close()
+                    raise ValueError("Redirección sin cabecera Location.")
+                current_url = urljoin(current_url, location)
+                response.close()
+                continue
+            elif response.ok:
+                break
+            else:
+                response.close()
+                response.raise_for_status()
+                break
+        else:
+            if response:
+                response.close()
+            raise ValueError("Demasiadas redirecciones.")
+
+        if not response or not response.ok:
+            raise ValueError("Fallo al descargar el archivo (estado no exitoso).")
+
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+        response.close()
     except Exception as e:
         if os.path.exists(expected_path):
             try:
