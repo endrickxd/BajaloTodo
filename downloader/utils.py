@@ -1,4 +1,7 @@
 import os
+import socket
+import ipaddress
+import urllib.parse
 import yt_dlp
 import uuid
 import requests
@@ -87,7 +90,39 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        current_url = download_url
+        response = None
+        for _ in range(5):  # Max redirects
+            parsed = urllib.parse.urlparse(current_url)
+            hostname = parsed.hostname
+            if not hostname:
+                raise ValueError("Invalid URL")
+
+            # Mitigates SSRF by preventing requests to internal infrastructure
+            try:
+                addr_info = socket.getaddrinfo(hostname, None)
+                for info in addr_info:
+                    ip_str = info[4][0]
+                    ip_obj = ipaddress.ip_address(ip_str)
+                    if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+                        raise ValueError("Access to internal/private IP is forbidden")
+            except (socket.gaierror, ValueError) as e:
+                raise ValueError(f"Invalid or forbidden host: {e}")
+
+            response = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+
+            if response.status_code in (301, 302, 303, 307, 308):
+                redirect_url = response.headers.get('Location')
+                response.close()
+                if not redirect_url:
+                    raise ValueError("Redirect missing Location header")
+                current_url = urllib.parse.urljoin(current_url, redirect_url)
+            else:
+                break
+
+        if not response or not response.ok:
+            raise ValueError(f"Failed to download, status code: {response.status_code if response else 'Unknown'}")
+
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
