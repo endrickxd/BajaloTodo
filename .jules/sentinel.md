@@ -1,0 +1,4 @@
+## 2024-10-13 - [TOCTOU DNS Rebinding Limitation in SSRF Protection]
+**Vulnerability:** The application was vulnerable to Server-Side Request Forgery (SSRF) when downloading media files from arbitrary URLs returned by external Cobalt APIs.
+**Learning:** When mitigating SSRF using application-layer IP validation (e.g., `socket.getaddrinfo`), there is an inherent Time-of-Check to Time-of-Use (TOCTOU) DNS rebinding limitation, as the underlying IP may change between validation and retrieval. Also, manual redirect handling is required to prevent SSRF bypasses via redirects.
+**Prevention:** Always validate hostnames (including DNS resolution to IP) and verify against restricted ranges (private, loopback, link-local, multicast, unspecified). When following redirects manually, ensure the new URLs are properly resolved and validated.
