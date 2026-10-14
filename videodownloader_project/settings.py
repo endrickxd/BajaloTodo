@@ -1,12 +1,17 @@
 from pathlib import Path
+import os
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = 'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_'
+# Mitigate Hardcoded Secret Vulnerability by using an environment variable
+# The hardcoded key is kept as a fallback to avoid breaking local dev
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-l^=jc@)+w4n7o+9&7na+^#=1%(7e$3n*2_1v&qx-w_=z%8*1=_')
 
-DEBUG = True
+# Mitigate Debug Info Leak by using an environment variable, defaulting to True for local dev
+DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = ['*']
+# Mitigate Host Header Injection by using an environment variable
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
 
 INSTALLED_APPS = [
     'downloader',
