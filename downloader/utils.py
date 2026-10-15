@@ -1,4 +1,7 @@
 import os
+import socket
+import ipaddress
+import urllib.parse
 import yt_dlp
 import uuid
 import requests
@@ -9,6 +12,59 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for info in addr_info:
+            ip_str = info[4][0].split('%')[0]
+            ip = ipaddress.ip_address(ip_str)
+
+            if getattr(ip, 'ipv4_mapped', None):
+                ip = ip.ipv4_mapped
+
+            if (ip.is_loopback or ip.is_private or ip.is_link_local or
+                ip.is_multicast or ip.is_unspecified):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"Error validating URL {url}: {e}")
+        return False
+
+def safe_requests_get_stream(url, timeout=60, max_redirects=5):
+    """Safely retrieves a stream, preventing SSRF during redirects."""
+    current_url = url
+    for _ in range(max_redirects):
+        if not is_safe_url(current_url):
+            raise ValueError(f"URL is not safe to fetch: {current_url}")
+
+        response = requests.get(current_url, stream=True, timeout=timeout, allow_redirects=False)
+
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                raise ValueError("Redirect without Location header")
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            continue
+
+        if response.ok:
+            return response
+
+        response.close()
+        response.raise_for_status()
+        break
+
+    raise ValueError("Too many redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,8 +143,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        response = safe_requests_get_stream(download_url, timeout=60)
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
