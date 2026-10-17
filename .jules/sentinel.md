@@ -1,0 +1,4 @@
+## 2024-05-18 - Prevent SSRF when fetching external resources
+**Vulnerability:** The application was vulnerable to Server-Side Request Forgery (SSRF) when downloading files from external URLs, as it didn't validate the resolved IP address of the target URL before fetching it.
+**Learning:** `requests.get` defaults to allowing redirects and doesn't inherently prevent requesting loopback or private network addresses, meaning malicious user input could target internal infrastructure. Using `socket.getaddrinfo` allows us to resolve the URL and block private IPs.
+**Prevention:** Implement an application-level URL validation function (e.g., `is_safe_url`) that uses `socket.getaddrinfo` to check if the destination IP is in a private or restricted range, and manually handle redirects with `allow_redirects=False` in `requests.get` to validate each step in the chain.
