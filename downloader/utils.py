@@ -4,11 +4,62 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    try:
+        parsed = urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for result in addr_info:
+            ip_str = result[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            mapped_ipv4 = getattr(ip, 'ipv4_mapped', None)
+            if mapped_ipv4:
+                ip = mapped_ipv4
+
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        return True
+    except Exception as e:
+        logger.warning(f"Error checking {url}: {e}")
+        return False
+
+def safe_requests_get_stream(url, **kwargs):
+    max_redirects = 5
+    current_url = url
+    for _ in range(max_redirects):
+        if not is_safe_url(current_url):
+            raise ValueError("Unsafe URL detected")
+
+        kwargs['allow_redirects'] = False
+        response = requests.get(current_url, **kwargs)
+
+        if response.is_redirect:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                raise ValueError("Redirect location missing")
+            current_url = urljoin(current_url, redirect_url)
+            continue
+
+        if response.ok:
+            return response
+
+        response.raise_for_status()
+        break
+
+    raise requests.exceptions.TooManyRedirects("Too many redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -44,6 +95,9 @@ def fetch_from_cobalt(url, is_audio=False):
 
     for instance in COBALT_INSTANCES:
         try:
+            if not is_safe_url(instance):
+                logger.warning(f"[COBALT] Skipping unsafe instance URL: {instance}")
+                continue
             logger.info(f"[COBALT] Trying Cobalt instance: {instance} for URL: {url}")
             response = requests.post(instance, json=payload, headers=headers, timeout=12)
             if response.status_code == 200:
@@ -87,7 +141,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
