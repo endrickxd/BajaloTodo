@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+from urllib.parse import urlparse, urljoin
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -85,10 +88,40 @@ def download_via_cobalt(url, is_audio=False):
     target_ext = 'mp3' if is_audio else 'mp4'
     expected_path = os.path.join(settings.DOWNLOADS_DIR, f"{unique_id}.{target_ext}")
 
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    def is_safe_url(target_url):
+        hostname = urlparse(target_url).hostname
+        if not hostname:
+            return False
+        try:
+            for info in socket.getaddrinfo(hostname, None):
+                ip = ipaddress.ip_address(info[4][0])
+                ip = getattr(ip, 'ipv4_mapped', None) or ip
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def safe_requests_get_stream(target_url, max_redir=5):
+        current_url = target_url
+        for _ in range(max_redir):
+            if not is_safe_url(current_url):
+                raise ValueError("Blocked SSRF attempt: Unsafe URL.")
+            resp = requests.get(current_url, stream=True, timeout=60, allow_redirects=False)
+            if resp.is_redirect:
+                resp.close()
+                current_url = urljoin(current_url, resp.headers.get("Location"))
+                continue
+            if resp.ok:
+                return resp
+            resp.raise_for_status()
+            break
+        raise requests.exceptions.TooManyRedirects()
+
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
-        response.raise_for_status()
+        response = safe_requests_get_stream(download_url)
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
