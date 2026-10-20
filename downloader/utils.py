@@ -4,11 +4,52 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import urllib.parse
+import ipaddress
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_url(url):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    try:
+        hostname = urllib.parse.urlparse(url).hostname
+        if not hostname:
+            return False
+
+        addr_info = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in addr_info:
+            ip = ipaddress.ip_address(sockaddr[0])
+            ip_to_check = getattr(ip, 'ipv4_mapped', None) or ip
+            if (ip_to_check.is_private or ip_to_check.is_loopback or
+                ip_to_check.is_link_local or ip_to_check.is_multicast or
+                ip_to_check.is_unspecified):
+                return False
+        return True
+    except Exception:
+        return False
+
+def safe_requests_get_stream(url, **kwargs):
+    # Mitigates SSRF by securely handling redirects and preventing requests to internal networks
+    max_redirects = 5
+    current_url = url
+    for _ in range(max_redirects):
+        if not is_safe_url(current_url):
+            raise ValueError("URL restricted to internal networks")
+        kwargs['allow_redirects'] = False
+        response = requests.get(current_url, **kwargs)
+        if response.is_redirect:
+            current_url = urllib.parse.urljoin(current_url, response.headers.get('Location', ''))
+            response.close()
+            continue
+        if response.ok:
+            return response
+        response.raise_for_status()
+        break
+    raise requests.exceptions.TooManyRedirects("Too many redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +128,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):

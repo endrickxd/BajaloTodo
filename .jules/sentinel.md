@@ -1,0 +1,4 @@
+## 2024-10-20 - SSRF via External File Download
+**Vulnerability:** A `requests.get` call inside `downloader/utils.py` parsed an external, user-influenced URL for file downloading without explicit domain/IP checks. The returned payload could have redirected the application to perform requests against the internal network infrastructure (Server-Side Request Forgery).
+**Learning:** Application-layer protections must correctly resolve IP addresses dynamically when filtering out private, loopback, link-local, multicast, or unspecified addresses using robust checks (e.g. `socket.getaddrinfo`, `ipaddress`). Keep in mind the Time-of-Check to Time-of-Use (TOCTOU) limitation inherent in DNS rebinding attacks.
+**Prevention:** Always validate external URLs and implement robust redirect tracking or disable automatic redirects entirely. Check loopbacks, private IPs, etc., against resolved IPs prior to network interactions.
