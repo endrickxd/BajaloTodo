@@ -1,9 +1,13 @@
-import os
-import yt_dlp
-import uuid
-import requests
+import ipaddress
 import logging
+import os
 import re
+import socket
+import urllib.parse
+import uuid
+
+import requests
+import yt_dlp
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,59 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def is_safe_url(url):
+    """Mitigates SSRF by preventing requests to internal infrastructure."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+
+        # Resolve hostname to IPs to handle DNS rebinding partially and validate against restricted ranges
+        addrinfo = socket.getaddrinfo(hostname, None)
+        for _, _, _, _, sockaddr in addrinfo:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+
+            # Check for mapped IPv4
+            mapped_ipv4 = getattr(ip, 'ipv4_mapped', None)
+            if mapped_ipv4:
+                ip_to_check = mapped_ipv4
+            else:
+                ip_to_check = ip
+
+            if (ip_to_check.is_private or ip_to_check.is_loopback or
+                ip_to_check.is_link_local or ip_to_check.is_multicast or
+                ip_to_check.is_unspecified):
+                return False
+        return True
+    except (ValueError, socket.gaierror):
+        return False
+
+def safe_requests_get_stream(url, timeout=60, max_redirects=5):
+    """Secure wrapper for requests.get with manual redirect handling to prevent SSRF bypass via redirects."""
+    current_url = url
+    for _ in range(max_redirects):
+        if not is_safe_url(current_url):
+            raise ValueError("URL points to a restricted IP address.")
+
+        response = requests.get(current_url, stream=True, timeout=timeout, allow_redirects=False)
+
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            if not redirect_url:
+                response.close()
+                raise ValueError("Redirect Location header missing.")
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            response.close()
+        elif 200 <= response.status_code < 300:
+            return response
+        else:
+            response.raise_for_status()
+            break # Fallback in case raise_for_status doesn't throw
+
+    raise requests.exceptions.TooManyRedirects("Exceeded maximum redirects.")
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -87,7 +144,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
