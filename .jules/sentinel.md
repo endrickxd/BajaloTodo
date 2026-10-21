@@ -1,0 +1,4 @@
+## 2024-10-21 - Critical SSRF vulnerability in download_via_cobalt
+**Vulnerability:** Server-Side Request Forgery (SSRF) in `download_via_cobalt` due to unvalidated `download_url` obtained from external Cobalt API, passed directly to `requests.get()`.
+**Learning:** External API responses containing URLs to download media cannot be trusted directly. Passing them to `requests.get()` without validation allows attackers to force the server to download data from internal network locations (like 127.0.0.1, AWS metadata endpoints, etc.), bypassing firewalls.
+**Prevention:** Implement strict IP-based validation using `socket.getaddrinfo` on any URL retrieved from external sources before calling `requests.get()`. Reject URLs that resolve to private, loopback, multicast, or unspecified IP addresses. Do not rely on DNS resolution without checking the resolved IP. When performing manual HTTP redirects using `requests`, also check intermediate URLs to prevent DNS rebinding.
