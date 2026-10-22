@@ -1,0 +1,4 @@
+## 2024-10-22 - [SSRF via External API Response]
+**Vulnerability:** Application accepted and blindly requested a redirect/download URL provided by an external Cobalt API response without validating if the URL pointed to internal or private IP addresses.
+**Learning:** Even when interacting with trusted external APIs, URLs returned in the response that the application subsequently requests must be strictly validated. The default behavior of `requests.get` to follow redirects can also bypass initial validation, requiring manual redirect handling.
+**Prevention:** Implement strict IP-based validation using `socket.getaddrinfo` to check against private/internal IP ranges (handling IPv4-mapped IPv6). Use manual redirect handling (`allow_redirects=False`) to validate every redirect hop before requesting it.
