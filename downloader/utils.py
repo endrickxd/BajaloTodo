@@ -4,6 +4,10 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+from requests.exceptions import TooManyRedirects
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -25,6 +29,107 @@ COBALT_INSTANCES = [
     "https://lime.clxxped.lol",
     "https://nuko-c.meowing.de",
 ]
+
+def is_safe_url(url):
+    """
+    Validates a URL to prevent SSRF by checking if it resolves to a local/private IP.
+    """
+    parsed = urllib.parse.urlparse(url)
+    hostname = parsed.hostname
+
+    if not hostname:
+        return False
+
+    try:
+        # Resolve hostname to all associated IPs to prevent DNS bypasses
+        addr_info = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return False
+
+    for res in addr_info:
+        ip_str = res[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            # Extract IPv4 address if it's an IPv4-mapped IPv6 address
+            mapped_ipv4 = getattr(ip, 'ipv4_mapped', None)
+            if mapped_ipv4:
+                ip = mapped_ipv4
+
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                return False
+        except ValueError:
+            return False
+
+    return True
+
+def safe_requests_get_stream(url, timeout=60, max_redirects=5):
+    """
+    Safely fetches a URL with stream=True, manually handling redirects
+    and checking each URL for SSRF vulnerabilities, while preventing
+    TOCTOU DNS rebinding by resolving and directly requesting the IP.
+    """
+    current_url = url
+    session = requests.Session()
+
+    for _ in range(max_redirects):
+        parsed = urllib.parse.urlparse(current_url)
+        hostname = parsed.hostname
+
+        if not hostname:
+            raise ValueError("Invalid URL format.")
+
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+        except socket.gaierror:
+            raise ValueError("Could not resolve hostname.")
+
+        valid_ip = None
+        for res in addr_info:
+            ip_str = res[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                mapped_ipv4 = getattr(ip_obj, 'ipv4_mapped', None)
+                if mapped_ipv4:
+                    ip_obj = mapped_ipv4
+
+                if not (ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified):
+                    valid_ip = ip_str
+                    break
+            except ValueError:
+                continue
+
+        if not valid_ip:
+            raise ValueError("URL points to restricted infrastructure.")
+
+        # Reconstruct the URL using the resolved IP to prevent TOCTOU
+        # We need to preserve the port if it existed
+        ip_host = f"[{valid_ip}]" if ":" in valid_ip else valid_ip
+        if parsed.port:
+            ip_host = f"{ip_host}:{parsed.port}"
+
+        ip_url = current_url.replace(hostname, ip_host, 1)
+
+        # Set the original hostname in the Host header
+        headers = {'Host': hostname}
+
+        response = session.get(ip_url, headers=headers, stream=True, timeout=timeout, allow_redirects=False)
+
+        if response.is_redirect:
+            redirect_url = response.headers.get("Location")
+            if not redirect_url:
+                response.close()
+                return response
+
+            # Resolve relative redirect URLs
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            response.close()
+            continue
+
+        # Not a redirect, return the response for the caller to handle (including errors like 404, 500)
+        return response
+
+    raise TooManyRedirects(f"Exceeded maximum number of redirects ({max_redirects})")
+
 
 def fetch_from_cobalt(url, is_audio=False):
     payload = {
@@ -87,7 +192,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
