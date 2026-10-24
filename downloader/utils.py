@@ -4,6 +4,13 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import urllib.parse
+import ipaddress
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.poolmanager import PoolManager
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +72,85 @@ def fetch_from_cobalt(url, is_audio=False):
             continue
     return None
 
+def check_ip_for_ssrf(ip_str):
+    ip = ipaddress.ip_address(ip_str)
+    ip = getattr(ip, 'ipv4_mapped', None) or ip
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        raise ValueError(f"Restricted IP address: {ip}")
+
+class SSRFHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        try:
+            addr_info = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed: {e}")
+
+        validated_ip = None
+        for family, socktype, proto, canonname, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            check_ip_for_ssrf(ip_str)
+            if not validated_ip:
+                validated_ip = ip_str
+
+        orig_host = self.host
+        self.host = validated_ip
+        try:
+            conn = super()._new_conn()
+        finally:
+            self.host = orig_host
+        return conn
+
+class SSRFHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        try:
+            addr_info = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed: {e}")
+
+        validated_ip = None
+        for family, socktype, proto, canonname, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            check_ip_for_ssrf(ip_str)
+            if not validated_ip:
+                validated_ip = ip_str
+
+        orig_host = self.host
+        self.host = validated_ip
+        try:
+            conn = super()._new_conn()
+        finally:
+            self.host = orig_host
+        return conn
+
+class SSRFHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SSRFHTTPConnection
+
+class SSRFHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SSRFHTTPSConnection
+
+class SSRFPoolManager(PoolManager):
+    def _new_pool(self, scheme, host, port, request_context=None):
+        if scheme == 'https':
+            return SSRFHTTPSConnectionPool(host, port, **self.connection_pool_kw)
+        elif scheme == 'http':
+            return SSRFHTTPConnectionPool(host, port, **self.connection_pool_kw)
+        return super()._new_pool(scheme, host, port, request_context)
+
+class SafeSSRFAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        self.poolmanager = SSRFPoolManager(
+            num_pools=connections, maxsize=maxsize,
+            block=block, **pool_kwargs)
+
+def safe_requests_get_stream(url, max_redirects=5, **kwargs):
+    session = requests.Session()
+    session.max_redirects = max_redirects
+    adapter = SafeSSRFAdapter()
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session.get(url, **kwargs)
+
 def download_via_cobalt(url, is_audio=False):
     if not os.path.exists(settings.DOWNLOADS_DIR):
         os.makedirs(settings.DOWNLOADS_DIR, exist_ok=True)
@@ -87,7 +173,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
