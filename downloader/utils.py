@@ -4,9 +4,110 @@ import uuid
 import requests
 import logging
 import re
+import urllib.parse
+import socket
+import ipaddress
+import urllib3.util.connection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from requests.exceptions import TooManyRedirects
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+def create_safe_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, socket_options=None):
+    host, port = address
+    if host.startswith('['):
+        host = host.strip('[]')
+
+    try:
+        addr_info = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise ValueError(f"Could not resolve host {host}")
+
+    safe_ip = None
+    for res in addr_info:
+        af, socktype, proto, canonname, sa = res
+        ip_str = sa[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            ipv4_mapped = getattr(ip, 'ipv4_mapped', None)
+            if ipv4_mapped: ip = ipv4_mapped
+
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                raise ValueError(f"URL resolves to an internal or restricted IP: {ip_str}")
+
+            safe_ip = ip_str
+            break
+        except ValueError as e:
+            if "resolves to an internal" in str(e):
+                raise
+            continue
+
+    if not safe_ip:
+        raise ValueError(f"No valid public IP found for {host}")
+
+    # Mitigates DNS rebinding (TOCTOU) by connecting directly to the validated IP, while SNI handles the original host
+    return urllib3.util.connection.create_connection((safe_ip, port), timeout, source_address, socket_options)
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        extra_kw = {}
+        if self.source_address:
+            extra_kw['source_address'] = self.source_address
+        if self.socket_options:
+            extra_kw['socket_options'] = self.socket_options
+
+        try:
+            conn = create_safe_connection(
+                (self.host, self.port), self.timeout, **extra_kw
+            )
+        except socket.error as e:
+            raise urllib3.exceptions.NewConnectionError(self, f"Failed to establish a new connection: {e}")
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SSRFSafeAdapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool,
+        }
+        self.poolmanager.key_fn_by_scheme = {
+            'http': self.poolmanager.key_fn_by_scheme['http'],
+            'https': self.poolmanager.key_fn_by_scheme['https'],
+        }
+
+def safe_requests_get_stream(url, timeout=60, max_redirects=5):
+    session = requests.Session()
+    session.mount('http://', SSRFSafeAdapter())
+    session.mount('https://', SSRFSafeAdapter())
+
+    current_url = url
+    for _ in range(max_redirects):
+        # Mitigates SSRF by preventing requests to internal infrastructure using custom adapter
+        response = session.get(current_url, stream=True, timeout=timeout, allow_redirects=False)
+
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+        else:
+            return response
+
+    raise TooManyRedirects("Exceeded maximum redirects")
 
 DURATION_LIMIT = 1800
 
@@ -87,7 +188,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
