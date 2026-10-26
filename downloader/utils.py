@@ -3,12 +3,75 @@ import yt_dlp
 import uuid
 import requests
 import logging
+import socket
+import ipaddress
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from requests.adapters import HTTPAdapter
 import re
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        ipv4_mapped = getattr(ip, 'ipv4_mapped', None)
+        if ipv4_mapped:
+            ip = ipv4_mapped
+        if (ip.is_private or ip.is_loopback or
+            ip.is_link_local or ip.is_multicast or
+            ip.is_unspecified):
+            return False
+        return True
+    except Exception:
+        return False
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        try:
+            addr_info = socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"No se pudo resolver el hostname: {self.host}") from e
+
+        for res in addr_info:
+            af, socktype, proto, canonname, sa = res
+            ip = sa[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"El destino de la red es inválido: {self.host} ({ip})")
+
+        return super()._new_conn()
+
+class SafeHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        try:
+            addr_info = socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"No se pudo resolver el hostname: {self.host}") from e
+
+        for res in addr_info:
+            af, socktype, proto, canonname, sa = res
+            ip = sa[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"El destino de la red es inválido: {self.host} ({ip})")
+
+        return super()._new_conn()
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool,
+        }
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +150,11 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        # Mitigates SSRF by preventing requests to internal infrastructure
+        session = requests.Session()
+        session.mount('http://', SafeAdapter())
+        session.mount('https://', SafeAdapter())
+        response = session.get(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
