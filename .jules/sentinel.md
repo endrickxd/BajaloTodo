@@ -1,0 +1,4 @@
+## 2024-10-26 - SSRF in download_via_cobalt via returned URL
+**Vulnerability:** The application blindly follows URLs returned by the external Cobalt API in `download_via_cobalt`. If a malicious Cobalt instance returns an internal IP (like `127.0.0.1` or AWS metadata endpoint `169.254.169.254`), the application will fetch it using `requests.get()` without validation, leading to Server-Side Request Forgery (SSRF).
+**Learning:** External APIs, even if supposedly trusted, can be compromised or spoofed via DNS. Relying on them to return safe URLs is dangerous. We must resolve and validate hostnames to IPs to prevent TOCTOU DNS rebinding before making connections.
+**Prevention:** Implement a custom `requests.adapters.HTTPAdapter` that subclasses `urllib3`'s `HTTPConnection` and `HTTPSConnection`, overriding `_new_conn()` to resolve and validate the IP before the socket connects, rejecting private, loopback, link-local, multicast, and unspecified IPs.
