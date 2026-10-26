@@ -1,0 +1,4 @@
+## 2024-10-24 - [CRITICAL] Prevent SSRF in Cobalt Download Feature
+**Vulnerability:** The `download_via_cobalt` function in `downloader/utils.py` is vulnerable to Server-Side Request Forgery (SSRF). It makes a `requests.get()` call to a URL extracted from an external API (Cobalt) response without validating that the URL points to a safe, public IP address.
+**Learning:** When fetching URLs obtained from third-party APIs, it is crucial to validate the destination IP address to prevent attackers from using the application to make unauthorized requests to internal infrastructure, private networks, or loopback interfaces.
+**Prevention:** Implement a custom `requests.adapters.HTTPAdapter` that overrides the connection pool behavior to resolve the hostname and validate the target IP address against a list of restricted ranges (e.g., private, loopback, multicast) before establishing the connection.
