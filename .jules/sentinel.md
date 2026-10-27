@@ -1,0 +1,4 @@
+## YYYY-MM-DD - Server-Side Request Forgery (SSRF) in Cobalt Downloader
+**Vulnerability:** The application uses external input (URLs from external Cobalt APIs) directly in `requests.get()` without validation, allowing SSRF. Since `requests.get()` follows redirects by default, even if the original URL is safe, it might redirect to a private IP (e.g., 127.0.0.1, internal metadata services), exposing internal infrastructure.
+**Learning:** External API responses containing URLs to fetch must be treated as untrusted input. Standard URL string validation is insufficient because DNS rebinding or redirects can bypass it.
+**Prevention:** Implement a custom `HTTPAdapter` that subclasses `urllib3` `HTTPConnection` to resolve the hostname and check the IP address against private/loopback/link-local ranges immediately before connecting the socket, preventing TOCTOU issues. Also, handle HTTP redirects manually to validate each target URL.
