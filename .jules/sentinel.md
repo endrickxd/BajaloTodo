@@ -1,0 +1,7 @@
+## 2024-10-30 - Prevent DNS Rebinding SSRF in `requests`
+
+**Vulnerability:** A Server-Side Request Forgery (SSRF) vulnerability existed in `downloader/utils.py` because `requests.get()` blindly fetched URLs provided by external sources without validating the resolved IP address against restricted ranges (e.g., private, loopback). Simply checking the hostname before the request is vulnerable to Time-Of-Check to Time-Of-Use (TOCTOU) DNS rebinding attacks.
+
+**Learning:** To securely mitigate SSRF in `requests` and prevent DNS rebinding, you cannot just validate the URL and then pass it to `requests.get()`. Instead, you must intercept the socket creation process. By creating a custom `HTTPAdapter` and `HTTPConnection` that override `_new_conn`, we can resolve the hostname once using `socket.getaddrinfo`, validate the exact IP address, and then directly connect the socket to that specific validated IP. This ensures the same IP address is used for both validation and connection. Furthermore, custom redirect handling is required to apply these checks across all hops, since `requests`' default redirect follower might re-resolve hostnames.
+
+**Prevention:** When fetching external URLs using `requests`, always implement application-layer IP validation. If using `urllib3` under the hood, override `_new_conn()` to bind the socket to the validated IP, preventing DNS rebinding. Disable automatic redirects (`allow_redirects=False`) and handle them manually to enforce the security policy on every redirect target.
