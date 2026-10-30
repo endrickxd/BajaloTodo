@@ -1,0 +1,4 @@
+## 2024-10-30 - [SSRF in external downloader]
+**Vulnerability:** Application downloaded media from a URL extracted from an external API response directly using `requests.get(url, stream=True)` without any validation, which allowed Server-Side Request Forgery (SSRF) including against internal services (like 127.0.0.1/metadata services).
+**Learning:** SSRF cannot be reliably prevented simply by string matching or `requests` properties, since DNS rebinding (TOCTOU attacks) can change the IP between the check and the actual connection. It's necessary to do application-layer resolution and connection overrides.
+**Prevention:** Always use a custom HTTP connection adapter that overrides `urllib3.connection.HTTPConnection._new_conn` to pass the previously validated IP address to `create_connection`, ensuring the request actually connects to the safe IP. Handle redirects manually and securely without `allow_redirects=True`.
