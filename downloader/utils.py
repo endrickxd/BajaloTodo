@@ -1,7 +1,14 @@
 import os
+import socket
+import ipaddress
+import urllib.parse
 import yt_dlp
 import uuid
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util.connection import create_connection
 import logging
 import re
 from django.conf import settings
@@ -9,6 +16,45 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+class SSRFMixin:
+    def _new_conn(self):
+        for res in socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+            af, socktype, proto, _, sa = res
+            ip = ipaddress.ip_address(sa[0])
+            ip_c = getattr(ip, 'ipv4_mapped', None) or ip
+            if ip_c.is_private or ip_c.is_loopback or ip_c.is_link_local or ip_c.is_multicast or ip_c.is_unspecified:
+                raise ValueError("SSRF blocked")
+            src = getattr(self, 'source_address', None)
+            return create_connection((sa[0], self.port), timeout=self.timeout, source_address=src)
+        raise socket.error("No IPs")
+
+class SafeHTTPConn(SSRFMixin, HTTPConnection): pass
+class SafeHTTPSConn(SSRFMixin, HTTPSConnection): pass
+class SafeHTTPPool(HTTPConnectionPool): ConnectionCls = SafeHTTPConn
+class SafeHTTPSPool(HTTPSConnectionPool): ConnectionCls = SafeHTTPSConn
+
+class SafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        super().init_poolmanager(*args, **kwargs)
+        self.poolmanager.pool_classes_by_scheme = self.poolmanager.pool_classes_by_scheme.copy()
+        self.poolmanager.pool_classes_by_scheme['http'] = SafeHTTPPool
+        self.poolmanager.pool_classes_by_scheme['https'] = SafeHTTPSPool
+
+def safe_requests_get_stream(url, **kwargs):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    session = requests.Session()
+    session.mount('http://', SafeAdapter())
+    session.mount('https://', SafeAdapter())
+    kwargs['allow_redirects'] = False
+    for _ in range(30):
+        resp = session.get(url, **kwargs)
+        if resp.is_redirect:
+            resp.close()
+            url = urllib.parse.urljoin(url, resp.headers['location'])
+        else:
+            return resp
+    raise requests.exceptions.TooManyRedirects()
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +133,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
