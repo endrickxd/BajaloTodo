@@ -1,9 +1,18 @@
-import os
-import yt_dlp
-import uuid
-import requests
+import ipaddress
 import logging
+import os
 import re
+import socket
+import urllib.parse
+import uuid
+
+import requests
+import yt_dlp
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util.connection import create_connection
+
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -25,6 +34,108 @@ COBALT_INSTANCES = [
     "https://lime.clxxped.lol",
     "https://nuko-c.meowing.de",
 ]
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        # explicitly check for and extract mapped IPv4 addresses
+        ipv4_mapped = getattr(ip, 'ipv4_mapped', None)
+        if ipv4_mapped:
+            ip = ipv4_mapped
+
+        # reject private, loopback, link-local, multicast, unspecified
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return False
+        return True
+    except ValueError:
+        return False
+
+def get_safe_ip(hostname):
+    try:
+        # socket.getaddrinfo
+        addrinfo = socket.getaddrinfo(hostname, None)
+        safe_ips = []
+        for info in addrinfo:
+            ip = info[4][0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"URL resolves to restricted IP: {ip}")
+            safe_ips.append(ip)
+        if not safe_ips:
+            raise ValueError(f"No valid IP addresses found for {hostname}")
+        return safe_ips[0] # returning the first safe IP to use for connection
+    except socket.gaierror:
+        raise ValueError(f"Could not resolve hostname: {hostname}")
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        # Prevent TOCTOU DNS rebinding: directly create and connect the socket using the previously validated IP address.
+        # Do not call super()._new_conn() as it re-resolves the host.
+        safe_ip = get_safe_ip(self.host)
+
+        extra_kw = {}
+        if getattr(self, 'socket_options', None):
+            extra_kw['socket_options'] = self.socket_options
+
+        conn = create_connection(
+            (safe_ip, self.port),
+            self.timeout,
+            source_address=self.source_address,
+            **extra_kw
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        # Do not mutate global module-level dictionary without copying
+        self.poolmanager.pool_classes_by_scheme = dict(self.poolmanager.pool_classes_by_scheme)
+        self.poolmanager.pool_classes_by_scheme['http'] = SafeHTTPConnectionPool
+        self.poolmanager.pool_classes_by_scheme['https'] = SafeHTTPSConnectionPool
+
+def safe_requests_get_stream(url, **kwargs):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    max_redirects = kwargs.pop('max_redirects', 30) # default requests limit
+    session = requests.Session()
+    adapter = SafeAdapter()
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    current_url = url
+    redirect_count = 0
+
+    kwargs['allow_redirects'] = False
+
+    while True:
+        if redirect_count > max_redirects:
+            raise requests.exceptions.TooManyRedirects(f"Exceeded max redirects limit of {max_redirects}")
+
+        parsed_url = urllib.parse.urlparse(current_url)
+        # also check scheme is http/https
+        if parsed_url.scheme not in ('http', 'https'):
+            raise ValueError(f"Unsupported scheme: {parsed_url.scheme}")
+
+        response = session.get(current_url, **kwargs)
+
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get('Location')
+            response.close() # Close intermediate responses
+            if not location:
+                return response
+            current_url = urllib.parse.urljoin(current_url, location)
+            redirect_count += 1
+        else:
+            return response
+
 
 def fetch_from_cobalt(url, is_audio=False):
     payload = {
@@ -87,7 +198,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
