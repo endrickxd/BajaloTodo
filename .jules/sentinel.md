@@ -1,0 +1,4 @@
+## 2024-10-31 - Fix SSRF via SafeHTTPAdapter
+**Vulnerability:** A Server-Side Request Forgery (SSRF) vulnerability existed in `download_via_cobalt`. The application fetched an external URL directly using `requests.get` after receiving it from a third-party API without checking if it pointed to internal infrastructure.
+**Learning:** Using application-layer IP validation without modifying the `HTTPAdapter` allows DNS rebinding and TOCTOU vulnerabilities, where the DNS lookup used for validation might differ from the DNS lookup used by `requests`.
+**Prevention:** Always mitigate SSRF when querying external, untrusted URLs by using a custom `requests.adapters.HTTPAdapter` overriding `urllib3`'s `HTTPConnection._new_conn` to validate the resolved IP addresses explicitly using `socket.getaddrinfo` and checking against restricted networks, and directly connecting via socket with the verified IP.
