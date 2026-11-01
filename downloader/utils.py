@@ -4,11 +4,107 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from requests.adapters import HTTPAdapter
+from urllib3.util.connection import create_connection
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def validate_host(host, port):
+    try:
+        addrinfo = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"Invalid hostname: {e}")
+
+    for family, type, proto, canonname, sockaddr in addrinfo:
+        ip = ipaddress.ip_address(sockaddr[0])
+        mapped = getattr(ip, 'ipv4_mapped', None)
+        if mapped:
+            ip = mapped
+
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or
+            ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+            raise ValueError(f"Blocked SSRF attempt to restricted IP: {ip}")
+
+    return addrinfo[0]
+
+class SSRFSafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        family, type, proto, canonname, sockaddr = validate_host(self.host, self.port or 80)
+        source_address = getattr(self, 'source_address', None)
+
+        conn = create_connection(
+            (sockaddr[0], self.port or 80),
+            self.timeout,
+            source_address=source_address,
+            socket_options=self.socket_options
+        )
+        return conn
+
+class SSRFSafeHTTPSConnection(HTTPSConnection, SSRFSafeHTTPConnection):
+    def _new_conn(self):
+        family, type, proto, canonname, sockaddr = validate_host(self.host, self.port or 443)
+        source_address = getattr(self, 'source_address', None)
+
+        conn = create_connection(
+            (sockaddr[0], self.port or 443),
+            self.timeout,
+            source_address=source_address,
+            socket_options=self.socket_options
+        )
+        return conn
+
+class SSRFSafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SSRFSafeHTTPConnection
+
+class SSRFSafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SSRFSafeHTTPSConnection
+
+class SSRFSafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        self.poolmanager = __import__('urllib3').PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs
+        )
+        self.poolmanager.pool_classes_by_scheme = dict(self.poolmanager.pool_classes_by_scheme)
+        self.poolmanager.pool_classes_by_scheme['http'] = SSRFSafeHTTPConnectionPool
+        self.poolmanager.pool_classes_by_scheme['https'] = SSRFSafeHTTPSConnectionPool
+
+def safe_requests_get_stream(url, **kwargs):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    session = requests.Session()
+    adapter = SSRFSafeAdapter()
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    max_redirects = kwargs.pop('max_redirects', 10)
+    kwargs['allow_redirects'] = False
+
+    current_url = url
+    redirect_count = 0
+
+    while redirect_count < max_redirects:
+        response = session.get(current_url, **kwargs)
+        if response.status_code in (301, 302, 303, 307, 308):
+            response.close()
+            redirect_url = response.headers.get('Location')
+            if not redirect_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            redirect_count += 1
+        else:
+            return response
+
+    raise requests.exceptions.TooManyRedirects(f"Exceeded max redirects ({max_redirects})")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +183,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
