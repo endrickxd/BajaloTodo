@@ -1,0 +1,4 @@
+## 2024-05-20 - SSRF Vulnerability in Cobalt Download
+**Vulnerability:** The application fetches external URLs provided by Cobalt instances using `requests.get` without explicit IP validation, potentially leading to Server-Side Request Forgery (SSRF) if the downloaded URL resolves to a local or private IP address.
+**Learning:** External API dependencies can return unsafe URLs. Directly streaming from arbitrary URLs returned by external services without validating the resolved IP address can expose internal network resources or loopback interfaces.
+**Prevention:** Always validate the IP address of any URL fetched by the server before making the request. Subclass `urllib3.connection.HTTPConnection` and implement the IP check inside `_new_conn()` using `socket.getaddrinfo` to prevent TOCTOU DNS rebinding bypasses, and mount this connection using a custom `requests.adapters.HTTPAdapter`.
