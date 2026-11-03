@@ -4,7 +4,75 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+import urllib3.util.connection as urllib3_cn
 from django.conf import settings
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        ipv4_mapped = getattr(ip, 'ipv4_mapped', None)
+        if ipv4_mapped:
+            ip = ipv4_mapped
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return False
+        return True
+    except ValueError:
+        return False
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        try:
+            addrinfo = socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise urllib3.exceptions.NameResolutionError(self.host, self, e)
+
+        safe_ip = None
+        for res in addrinfo:
+            af, socktype, proto, canonname, sa = res
+            ip = sa[0]
+            if is_safe_ip(ip):
+                safe_ip = ip
+                break
+
+        if not safe_ip:
+            raise ValueError(f"Mitigates SSRF by preventing requests to internal infrastructure: {self.host}")
+
+        conn = urllib3_cn.create_connection(
+            (safe_ip, self.port),
+            self.timeout,
+            source_address=getattr(self, 'source_address', None),
+            socket_options=getattr(self, 'socket_options', None)
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = self.poolmanager.pool_classes_by_scheme.copy()
+        self.poolmanager.pool_classes_by_scheme['http'] = SafeHTTPConnectionPool
+        self.poolmanager.pool_classes_by_scheme['https'] = SafeHTTPSConnectionPool
+
+def safe_requests_get_stream(url, **kwargs):
+    session = requests.Session()
+    session.mount('http://', SafeAdapter())
+    session.mount('https://', SafeAdapter())
+    return session.get(url, **kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +155,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
