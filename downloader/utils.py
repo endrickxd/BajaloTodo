@@ -4,7 +4,82 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
 from django.conf import settings
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util.connection import create_connection
+
+# SSRF Protection
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        ipv4_mapped = getattr(ip, 'ipv4_mapped', None)
+        if ipv4_mapped:
+            ip = ipv4_mapped
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified)
+    except ValueError:
+        return False
+
+class SSRFSafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        safe_ip = None
+        for res in socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+            af, socktype, proto, canonname, sa = res
+            ip = sa[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"Blocked SSRF attempt to restricted IP: {ip}")
+            if safe_ip is None:
+                safe_ip = ip # Use the first safe IP
+
+        if not safe_ip:
+            raise ValueError(f"Could not resolve safe IP for {self.host}")
+
+        return create_connection(
+            (safe_ip, self.port),
+            self.timeout,
+            source_address=getattr(self, 'source_address', None),
+            socket_options=self.socket_options
+        )
+
+class SSRFSafeHTTPSConnection(HTTPSConnection, SSRFSafeHTTPConnection):
+    def _new_conn(self):
+        return SSRFSafeHTTPConnection._new_conn(self)
+
+class SSRFSafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SSRFSafeHTTPConnection
+
+class SSRFSafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SSRFSafeHTTPSConnection
+
+class SSRFSafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = self.poolmanager.pool_classes_by_scheme.copy()
+        self.poolmanager.pool_classes_by_scheme['http'] = SSRFSafeHTTPConnectionPool
+        self.poolmanager.pool_classes_by_scheme['https'] = SSRFSafeHTTPSConnectionPool
+
+def safe_requests_get_stream(url, **kwargs):
+    session = requests.Session()
+    session.mount('http://', SSRFSafeAdapter())
+    session.mount('https://', SSRFSafeAdapter())
+
+    max_redirects = 10
+    current_url = url
+    for _ in range(max_redirects):
+        response = session.get(current_url, allow_redirects=False, **kwargs)
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+        else:
+            return response
+    raise requests.exceptions.TooManyRedirects(f"Exceeded {max_redirects} redirects")
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +162,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
