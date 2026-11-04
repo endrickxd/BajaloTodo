@@ -4,7 +4,134 @@ import uuid
 import requests
 import logging
 import re
+import urllib.parse
+import ipaddress
+import socket
+import urllib3
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from requests.adapters import HTTPAdapter
+from requests.sessions import Session
 from django.conf import settings
+
+def is_internal_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        mapped = getattr(ip, 'ipv4_mapped', None)
+        if mapped:
+            ip = mapped
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified
+    except ValueError:
+        return True
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        validated_ip = getattr(self, '_validated_ip', None)
+        if not validated_ip:
+            raise ValueError("No validated IP provided")
+
+        extra_kw = {}
+        if getattr(self, 'source_address', None):
+            extra_kw['source_address'] = getattr(self, 'source_address', None)
+        if getattr(self, 'socket_options', None):
+            extra_kw['socket_options'] = self.socket_options
+
+        conn = urllib3.util.connection.create_connection(
+            (validated_ip, self.port),
+            self.timeout,
+            **extra_kw
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        validated_ip = getattr(self, '_validated_ip', None)
+        if not validated_ip:
+            raise ValueError("No validated IP provided")
+
+        extra_kw = {}
+        if getattr(self, 'source_address', None):
+            extra_kw['source_address'] = getattr(self, 'source_address', None)
+        if getattr(self, 'socket_options', None):
+            extra_kw['socket_options'] = self.socket_options
+
+        conn = urllib3.util.connection.create_connection(
+            (validated_ip, self.port),
+            self.timeout,
+            **extra_kw
+        )
+        return conn
+
+class SafeHTTPAdapter(HTTPAdapter):
+    def __init__(self, validated_ip, *args, **kwargs):
+        self.validated_ip = validated_ip
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+
+        class SafeHTTPPool(HTTPConnectionPool):
+            ConnectionCls = SafeHTTPConnection
+            def _new_conn(self2):
+                self2.num_connections += 1
+                conn = self2.ConnectionCls(host=self2.host, port=self2.port, timeout=self2.timeout.connect_timeout, **self2.conn_kw)
+                conn._validated_ip = self.validated_ip
+                return conn
+
+        class SafeHTTPSPool(HTTPSConnectionPool):
+            ConnectionCls = SafeHTTPSConnection
+            def _new_conn(self2):
+                self2.num_connections += 1
+                conn = self2.ConnectionCls(host=self2.host, port=self2.port, timeout=self2.timeout.connect_timeout, **self2.conn_kw)
+                conn._validated_ip = self.validated_ip
+                return conn
+
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPPool,
+            'https': SafeHTTPSPool
+        }
+
+def safe_requests_get_stream(url, timeout=60, max_redirects=10):
+    current_url = url
+    for _ in range(max_redirects):
+        parsed = urllib.parse.urlparse(current_url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Invalid URL")
+
+        try:
+            addrinfo = socket.getaddrinfo(hostname, 80 if parsed.scheme == 'http' else 443, 0, socket.SOCK_STREAM)
+        except socket.gaierror:
+            raise ValueError("Cannot resolve hostname")
+
+        valid_ip = None
+        for res in addrinfo:
+            ip = res[4][0]
+            if is_internal_ip(ip):
+                raise ValueError(f"URL resolves to restricted IP: {ip}")
+            if valid_ip is None:
+                valid_ip = ip
+
+        if valid_ip is None:
+            raise ValueError("No valid IP found")
+
+        session = Session()
+        adapter = SafeHTTPAdapter(validated_ip=valid_ip)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
+        response = session.get(current_url, stream=True, timeout=timeout, allow_redirects=False)
+        if response.is_redirect:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                raise ValueError("Redirect missing Location header")
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            continue
+
+        return response
+
+    raise requests.exceptions.TooManyRedirects(f"Exceeded {max_redirects} redirects")
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +214,8 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        # Mitigates SSRF by preventing requests to internal infrastructure
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):

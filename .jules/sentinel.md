@@ -1,0 +1,4 @@
+## 2024-03-24 - SSRF in External Download Endpoint
+**Vulnerability:** An SSRF vulnerability was present where an external URL parsed from a response (the Cobalt media downloader) was passed directly to `requests.get()` without validation, allowing potential requests to internal IP addresses (127.0.0.1, 169.254.x.x).
+**Learning:** Checking the URL hostname against private IPs is necessary, but simply replacing the hostname with the validated IP in the URL breaks SNI/HTTPS. Standard `requests` hooks are insufficient to prevent TOCTOU (Time-of-check to time-of-use) DNS rebinding attacks securely.
+**Prevention:** We must use a custom HTTP adapter (`HTTPAdapter`) that subclasses `urllib3`'s `HTTPConnection` and completely overrides `_new_conn()` to construct the socket using the exact IP address validated earlier in the loop (via `socket.getaddrinfo`), preventing any subsequent DNS resolution bypasses by `requests` itself.
