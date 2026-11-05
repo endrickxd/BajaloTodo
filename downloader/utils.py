@@ -4,11 +4,68 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.poolmanager import PoolManager
+from urllib3.util import connection
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+class SafeConnMixin:
+    def _new_conn(self):
+        valid_ip = None
+        for info in socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM):
+            ip = ipaddress.ip_address(info[4][0])
+            ip = getattr(ip, 'ipv4_mapped', None) or ip
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+                raise ValueError(f"SSRF blocked: Host {self.host} resolved to restricted IP {ip}")
+            if not valid_ip:
+                valid_ip = info[4][0]
+        if not valid_ip:
+            raise ValueError("SSRF blocked: Could not resolve to a valid public IP")
+        return connection.create_connection(
+            (valid_ip, self.port),
+            timeout=self.timeout,
+            source_address=getattr(self, 'source_address', None),
+            socket_options=getattr(self, 'socket_options', None)
+        )
+
+class SHTTPConn(SafeConnMixin, HTTPConnection): pass
+class SHTTPSConn(SafeConnMixin, HTTPSConnection): pass
+class SHTTPPool(HTTPConnectionPool): ConnectionCls = SHTTPConn
+class SHTTPSPool(HTTPSConnectionPool): ConnectionCls = SHTTPSConn
+
+class SafeSSRFAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        # Override the pool_classes_by_scheme just for this instance
+        self.poolmanager = PoolManager(num_pools=connections, maxsize=maxsize, block=block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SHTTPPool,
+            'https': SHTTPSPool
+        }
+
+def safe_requests_get_stream(url, **kwargs):
+    """Mitigates SSRF by preventing requests to internal infrastructure"""
+    session = requests.Session()
+    session.mount('http://', SafeSSRFAdapter())
+    session.mount('https://', SafeSSRFAdapter())
+    kwargs['allow_redirects'] = False
+    for _ in range(10):
+        res = session.get(url, **kwargs)
+        if res.status_code in (301, 302, 303, 307, 308):
+            res.close()
+            url = urllib.parse.urljoin(url, res.headers['Location'])
+        else:
+            return res
+    raise requests.exceptions.TooManyRedirects()
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +144,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
