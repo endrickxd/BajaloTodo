@@ -4,11 +4,98 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+import urllib3.connection
+from urllib3.util.connection import create_connection
+from urllib3.exceptions import NewConnectionError
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+class SafeHTTPConnection(urllib3.connection.HTTPConnection):
+    def _new_conn(self):
+        try:
+            addrinfo = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise NewConnectionError(self, f"Failed to establish a new connection: {e}")
+
+        for family, _type, proto, canonname, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                ipv4_mapped = getattr(ip_obj, 'ipv4_mapped', None)
+                if ipv4_mapped:
+                    ip_obj = ipv4_mapped
+                # Mitigates SSRF by preventing requests to internal infrastructure
+                if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+                    raise NewConnectionError(self, f"Blocked attempt to access private IP: {ip}")
+            except ValueError:
+                pass
+
+        for family, _type, proto, canonname, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            try:
+                sock = create_connection(
+                    (ip, self.port),
+                    timeout=self.timeout,
+                    source_address=getattr(self, 'source_address', None),
+                    socket_options=getattr(self, 'socket_options', None)
+                )
+                return sock
+            except Exception:
+                continue
+        raise NewConnectionError(self, f"Failed to establish a new connection to {self.host}")
+
+class SafeHTTPSConnection(urllib3.connection.HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeHTTPAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool
+        }
+
+def safe_requests_get_stream(url, **kwargs):
+    session = requests.Session()
+    adapter = SafeHTTPAdapter()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    kwargs['allow_redirects'] = False
+
+    max_redirects = 10
+    redirects = 0
+    current_url = url
+
+    while redirects < max_redirects:
+        response = session.get(current_url, **kwargs)
+        if 300 <= response.status_code < 400:
+            response.close()
+            next_url = response.headers.get('Location')
+            if not next_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, next_url)
+            redirects += 1
+        else:
+            return response
+
+    raise requests.exceptions.TooManyRedirects(f"Exceeded {max_redirects} redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +174,8 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        # Use custom safe request to mitigate SSRF
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
