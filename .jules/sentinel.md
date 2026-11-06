@@ -1,0 +1,4 @@
+## 2024-05-18 - SSRF Vulnerability in Cobalt Download Endpoint
+**Vulnerability:** The application is vulnerable to Server-Side Request Forgery (SSRF) because it fetches the `download_url` returned from Cobalt API directly using `requests.get()` without proper validation. This allows an attacker to fetch arbitrary content or scan internal network using the application server by providing a custom cobalt server mimicking a response.
+**Learning:** External URLs returned from APIs (even trusted ones) must be explicitly validated (including DNS resolution to check for private IPs) before being fetched to prevent SSRF vulnerabilities.
+**Prevention:** Implement a custom `HTTPAdapter` subclassing `urllib3.connection.HTTPConnection` and overriding `_new_conn()` to resolve IP address and validate if it falls into private/loopback/link-local ranges, completely replacing `requests.get()` in `downloader/utils.py`.
