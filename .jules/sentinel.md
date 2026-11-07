@@ -1,0 +1,4 @@
+## 2024-11-07 - [CRITICAL] Prevent SSRF via external URLs
+**Vulnerability:** The application fetches external URLs returned by Cobalt without validating them, allowing Server-Side Request Forgery (SSRF) against internal infrastructure.
+**Learning:** Even when fetching seemingly safe files (like media), if the URL originates from an external or untrusted source, it must be validated. Standard `requests.get` will connect to any IP, including internal ones like localhost or 169.254.169.254, and will follow redirects to internal networks, bypassing initial domain validation.
+**Prevention:** Always validate resolved IP addresses against private/local ranges before establishing a connection. Implement custom connection pooling to prevent TOCTOU DNS rebinding, and manually handle redirects to ensure every hop is validated.
