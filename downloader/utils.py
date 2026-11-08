@@ -4,11 +4,119 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util.connection import create_connection
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        mapped_ipv4 = getattr(ip, 'ipv4_mapped', None)
+        if mapped_ipv4:
+            ip = mapped_ipv4
+
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified)
+    except ValueError:
+        return False
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        host = self.host
+        port = self.port
+        try:
+            addrinfo = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed for {host}") from e
+
+        safe_ip = None
+        for family, type, proto, canonname, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"Unsafe IP address detected: {ip}")
+            safe_ip = ip
+
+        if not safe_ip:
+            raise ValueError(f"No safe IP address found for {host}")
+
+        conn = create_connection(
+            (safe_ip, port),
+            self.timeout,
+            source_address=getattr(self, 'source_address', None)
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        host = self.host
+        port = self.port
+        try:
+            addrinfo = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed for {host}") from e
+
+        safe_ip = None
+        for family, type, proto, canonname, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"Unsafe IP address detected: {ip}")
+            safe_ip = ip
+
+        if not safe_ip:
+            raise ValueError(f"No safe IP address found for {host}")
+
+        conn = create_connection(
+            (safe_ip, port),
+            self.timeout,
+            source_address=getattr(self, 'source_address', None)
+        )
+        return conn
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeHTTPAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool,
+        }
+
+def safe_requests_get_stream(url, **kwargs):
+    session = requests.Session()
+    session.mount('http://', SafeHTTPAdapter())
+    session.mount('https://', SafeHTTPAdapter())
+
+    kwargs['allow_redirects'] = False
+
+    current_url = url
+    max_redirects = kwargs.get('max_redirects', 30)
+
+    for _ in range(max_redirects):
+        # Mitigates SSRF by preventing requests to internal infrastructure
+        response = session.get(current_url, **kwargs)
+        if response.is_redirect:
+            response.close()
+            next_url = response.headers.get('Location')
+            if not next_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, next_url)
+        else:
+            return response
+
+    raise requests.exceptions.TooManyRedirects(f"Exceeded {max_redirects} redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +195,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
