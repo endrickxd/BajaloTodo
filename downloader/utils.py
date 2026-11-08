@@ -4,7 +4,109 @@ import uuid
 import requests
 import logging
 import re
+import urllib.parse
+import socket
+import ipaddress
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.poolmanager import PoolManager
+from requests.adapters import HTTPAdapter
+from urllib3.util.connection import create_connection
 from django.conf import settings
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        mapped = getattr(ip, 'ipv4_mapped', None)
+        if mapped:
+            ip = mapped
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified)
+    except ValueError:
+        return False
+
+def get_safe_ip(hostname):
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None)
+        safe_ip = None
+        for info in addrinfo:
+            ip_str = info[4][0]
+            if not is_safe_ip(ip_str):
+                raise ValueError(f"URL resolves to restricted IP: {ip_str}")
+            if safe_ip is None:
+                safe_ip = ip_str
+        return safe_ip
+    except socket.gaierror:
+        raise ValueError(f"Failed to resolve hostname: {hostname}")
+
+class SafeHTTPAdapter(HTTPAdapter):
+    def __init__(self, safe_ip, *args, **kwargs):
+        self._safe_ip = safe_ip
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        self.poolmanager = PoolManager(
+            num_pools=connections, maxsize=maxsize,
+            block=block, **pool_kwargs
+        )
+
+        # We subclass HTTPConnection and HTTPSConnection to override _new_conn
+        class PatchedHTTPConnection(HTTPConnection):
+            _safe_ip = self._safe_ip
+            def _new_conn(self_conn):
+                conn = create_connection(
+                    (self_conn._safe_ip, self_conn.port),
+                    self_conn.timeout,
+                    source_address=getattr(self_conn, 'source_address', None),
+                    socket_options=getattr(self_conn, 'socket_options', None)
+                )
+                return conn
+
+        class PatchedHTTPSConnection(PatchedHTTPConnection, HTTPSConnection):
+            pass
+
+        class PatchedHTTPConnectionPool(HTTPConnectionPool):
+            ConnectionCls = PatchedHTTPConnection
+
+        class PatchedHTTPSConnectionPool(HTTPSConnectionPool):
+            ConnectionCls = PatchedHTTPSConnection
+
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': PatchedHTTPConnectionPool,
+            'https': PatchedHTTPSConnectionPool,
+        }
+
+def safe_requests_get_stream(url, **kwargs):
+    max_redirects = 10
+    current_url = url
+
+    for _ in range(max_redirects):
+        parsed = urllib.parse.urlparse(current_url)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("Invalid URL")
+
+        safe_ip = get_safe_ip(hostname)
+
+        session = requests.Session()
+        adapter = SafeHTTPAdapter(safe_ip=safe_ip)
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+
+        kwargs['allow_redirects'] = False
+
+        response = session.get(current_url, **kwargs)
+
+        if response.is_redirect:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            continue
+
+        return response
+
+    raise requests.exceptions.TooManyRedirects("Exceeded maximum redirects")
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +189,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, stream=True, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
