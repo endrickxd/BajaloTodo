@@ -4,11 +4,117 @@ import uuid
 import requests
 import logging
 import re
+import socket
+import ipaddress
+import urllib.parse
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from requests.adapters import HTTPAdapter
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_ip_restricted(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        mapped_ipv4 = getattr(ip, 'ipv4_mapped', None)
+        if mapped_ipv4:
+            ip = mapped_ipv4
+        return (
+            ip.is_private or
+            ip.is_loopback or
+            ip.is_link_local or
+            ip.is_multicast or
+            ip.is_unspecified
+        )
+    except ValueError:
+        return True
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        try:
+            addrinfo = socket.getaddrinfo(self.host, self.port, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed: {e}")
+
+        safe_ip = None
+        for res in addrinfo:
+            af, socktype, proto, canonname, sa = res
+            ip = sa[0]
+            if is_ip_restricted(ip):
+                raise ValueError(f"Access to IP {ip} is restricted")
+            safe_ip = ip
+            break
+
+        if not safe_ip:
+            raise ValueError("No valid IP found")
+
+        import urllib3.util.connection as urllib3_cn
+        extra_kw = {}
+        if hasattr(self, 'source_address'):
+            extra_kw['source_address'] = self.source_address
+
+        if hasattr(self, 'socket_options'):
+            extra_kw['socket_options'] = self.socket_options
+
+        conn = urllib3_cn.create_connection(
+            (safe_ip, self.port),
+            self.timeout,
+            **extra_kw,
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SafeHTTPAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool,
+        }
+
+def safe_requests_get_stream(url, **kwargs):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    session = requests.Session()
+    session.mount('http://', SafeHTTPAdapter())
+    session.mount('https://', SafeHTTPAdapter())
+
+    max_redirects = 5
+    current_url = url
+    headers = kwargs.pop('headers', {})
+    timeout = kwargs.pop('timeout', 60)
+
+    for _ in range(max_redirects):
+        response = session.get(
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+            stream=True
+        )
+
+        if 300 <= response.status_code < 400:
+            redirect_url = response.headers.get('Location')
+            response.close()
+            if not redirect_url:
+                break
+            current_url = urllib.parse.urljoin(current_url, redirect_url)
+            continue
+
+        return response
+
+    raise requests.exceptions.TooManyRedirects(f"Exceeded {max_redirects} redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +193,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
