@@ -5,10 +5,100 @@ import requests
 import logging
 import re
 from django.conf import settings
+import urllib.parse
+import socket
+import ipaddress
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+from urllib3.util.connection import create_connection
+from requests.adapters import HTTPAdapter
+from requests.exceptions import TooManyRedirects
 
 logger = logging.getLogger(__name__)
 
 DURATION_LIMIT = 1800
+
+def is_safe_ip(ip_str):
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        mapped = getattr(ip, 'ipv4_mapped', None)
+        if mapped:
+            ip = mapped
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            return False
+        return True
+    except ValueError:
+        return False
+
+class SafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        try:
+            addrinfo = socket.getaddrinfo(self.host, self.port, 0, socket.SOCK_STREAM)
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed for {self.host}") from e
+
+        safe_ips = []
+        for family, type, proto, canonname, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            if not is_safe_ip(ip):
+                raise ValueError(f"SSRF Attempt! Resolved IP {ip} is in restricted range.")
+            safe_ips.append(sockaddr)
+
+        first_ip = safe_ips[0][0]
+        extra_kw = {}
+        if hasattr(self, 'socket_options'):
+            extra_kw['socket_options'] = self.socket_options
+
+        conn = create_connection(
+            (first_ip, self.port),
+            self.timeout,
+            source_address=getattr(self, 'source_address', None),
+            **extra_kw
+        )
+        return conn
+
+class SafeHTTPSConnection(HTTPSConnection, SafeHTTPConnection):
+    def _new_conn(self):
+        return SafeHTTPConnection._new_conn(self)
+
+class SafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = SafeHTTPConnection
+
+class SafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = SafeHTTPSConnection
+
+class SSRFSafeAdapter(HTTPAdapter):
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        super().init_poolmanager(connections, maxsize, block, **pool_kwargs)
+        self.poolmanager.pool_classes_by_scheme = {
+            'http': SafeHTTPConnectionPool,
+            'https': SafeHTTPSConnectionPool,
+        }
+
+def safe_requests_get_stream(url, timeout=60):
+    # Mitigates SSRF by preventing requests to internal infrastructure
+    session = requests.Session()
+    adapter = SSRFSafeAdapter()
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+
+    max_redirects = 5
+    redirects = 0
+    current_url = url
+
+    while redirects < max_redirects:
+        response = session.get(current_url, stream=True, timeout=timeout, allow_redirects=False)
+        if response.is_redirect:
+            redirects += 1
+            response.close()
+            next_url = response.headers.get('Location')
+            if not next_url:
+                return response
+            current_url = urllib.parse.urljoin(current_url, next_url)
+        else:
+            return response
+
+    raise TooManyRedirects("Exceeded maximum number of redirects")
 
 COBALT_INSTANCES = [
     "https://apicobalt.mgytr.top",
@@ -87,7 +177,7 @@ def download_via_cobalt(url, is_audio=False):
 
     # Stream the file from the Cobalt tunnel/redirect URL and save it locally
     try:
-        response = requests.get(download_url, stream=True, timeout=60)
+        response = safe_requests_get_stream(download_url, timeout=60)
         response.raise_for_status()
         with open(expected_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
